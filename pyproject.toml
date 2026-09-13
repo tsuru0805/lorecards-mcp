@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lorecards-mcp"
+version = "0.1.0"
+description = "A keyword-triggered card book for companion agents: plain-Markdown cards that surface when the conversation mentions them."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "tsuru0805" }]
+keywords = ["mcp", "lorebook", "worldinfo", "memory", "claude", "companion"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Text Processing :: Markup :: Markdown",
+]
+dependencies = [
+  "pyyaml>=6.0",
+  "mcp>=1.2",
+]
+
+[project.optional-dependencies]
+zh = ["jieba>=0.42"]
+dev = ["pytest>=8.0", "jieba>=0.42"]
+
+[project.scripts]
+lorecards = "lorecards.cli:main"
+lorecards-mcp = "lorecards.server:main"
+
+[project.urls]
+Homepage = "https://github.com/tsuru0805/lorecards-mcp"
+Issues = "https://github.com/tsuru0805/lorecards-mcp/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["lorecards"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
