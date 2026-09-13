@@ -1,4 +1,4 @@
-"""Command line: try a sentence against the vault, list, check, init, import, export, hook."""
+"""Command line: try, list, read, check, init, import, export, hook, ui, gateway."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import engine, io as lore_io, schema as sc
+from . import engine, gateway, io as lore_io, schema as sc, web
 
 DEFAULT_VAULT = "~/.lorecards"
 ENV_VAULT = "LORECARDS_VAULT"
@@ -228,6 +228,21 @@ def _recent_turns_from_transcript(path: str | None, depth: int) -> list[dict]:
     return turns[-(max(depth, 1) * 2):]
 
 
+def cmd_ui(args: argparse.Namespace) -> int:
+    """Serve the web editor. Blocks until interrupted."""
+    web.run_ui(resolve_vault(args.vault), host=args.host, port=args.port, token=args.token)
+    return 0
+
+
+def cmd_gateway(args: argparse.Namespace) -> int:
+    """Run the injecting proxy. Blocks until interrupted."""
+    gateway.run_gateway(resolve_vault(args.vault), args.upstream, host=args.host, port=args.port,
+                        inject=args.inject, window=args.window,
+                        reinject_after=args.reinject_after, budget_chars=args.budget,
+                        framing=args.framing)
+    return 0
+
+
 def cmd_hook(args: argparse.Namespace) -> int:
     """Claude Code ``UserPromptSubmit`` hook (contract as documented on 2026-09-13).
 
@@ -248,7 +263,20 @@ def cmd_hook(args: argparse.Namespace) -> int:
         turns = _recent_turns_from_transcript(payload.get("transcript_path"), args.scan_depth)
         result = engine.consult(prompt, vault, turns=turns, budget_chars=args.budget,
                                 scan_depth=args.scan_depth)
+        hits = result["hits"]
+        if hits and args.reinject_after > 0:
+            # one Claude Code session is one conversation: a card that surfaced two turns
+            # ago is still in the context window, so do not pay for it again
+            conversation = str(payload.get("session_id") or "hook")
+            turn = gateway.next_turn(vault, conversation)
+            allowed = gateway.pick_new(vault, conversation, [c.key for c in hits], turn,
+                                       args.reinject_after)
+            hits = [c for c in hits if c.key in allowed]
+            gateway.record(vault, conversation, [c.key for c in hits], turn)
+            result = dict(result, hits=hits)
         context = engine.render_context(result, HOOK_HEADER)
+        if hits and not args.no_log:
+            engine.log_hits(vault, "hook", hits, text=str(prompt))
     except Exception as e:  # never break the user's prompt over a card
         print(f"lorecards hook: {e}", file=sys.stderr)
         return 0
@@ -315,7 +343,38 @@ def build_parser() -> argparse.ArgumentParser:
     hk = sub.add_parser("hook", help="Claude Code UserPromptSubmit hook (reads hook JSON on stdin)")
     hk.add_argument("--budget", type=int, default=engine.DEFAULT_BUDGET_CHARS)
     hk.add_argument("--scan-depth", dest="scan_depth", type=int, default=engine.DEFAULT_SCAN_DEPTH)
+    hk.add_argument("--reinject-after", dest="reinject_after", type=int,
+                    default=gateway.DEFAULT_REINJECT_AFTER,
+                    help="turns before a card may be injected again in one session "
+                         "(0 = inject every time; default: %(default)s)")
+    hk.add_argument("--no-log", action="store_true",
+                    help="do not record what surfaced in the vault's hit ledger")
     hk.set_defaults(func=cmd_hook)
+
+    ui = sub.add_parser("ui", help="serve the local web editor (JSON API + one page)")
+    ui.add_argument("--host", default="127.0.0.1",
+                    help="interface to bind (default: %(default)s; anything else needs --token)")
+    ui.add_argument("--port", type=int, default=web.DEFAULT_PORT)
+    ui.add_argument("--token", help="require Authorization: Bearer <token> on /api/*")
+    ui.set_defaults(func=cmd_ui)
+
+    gw = sub.add_parser("gateway", help="proxy an LLM API and inject cards into the prompt")
+    gw.add_argument("--upstream", required=True,
+                    help="the API this sits in front of, e.g. https://api.openai.com")
+    gw.add_argument("--host", default="127.0.0.1")
+    gw.add_argument("--port", type=int, default=gateway.DEFAULT_PORT)
+    gw.add_argument("--inject", choices=["user", "system"], default="user",
+                    help="where the cards go (default: %(default)s)")
+    gw.add_argument("--window", type=int, default=gateway.DEFAULT_WINDOW,
+                    help="turns of history to scan (default: %(default)s)")
+    gw.add_argument("--reinject-after", dest="reinject_after", type=int,
+                    default=gateway.DEFAULT_REINJECT_AFTER,
+                    help="turns before the same card may be injected again "
+                         "(0 = every time; default: %(default)s)")
+    gw.add_argument("--budget", type=int, default=engine.DEFAULT_BUDGET_CHARS)
+    gw.add_argument("--framing", default=gateway.DEFAULT_FRAMING,
+                    help="the line that introduces the cards (default: %(default)r)")
+    gw.set_defaults(func=cmd_gateway)
     return p
 
 

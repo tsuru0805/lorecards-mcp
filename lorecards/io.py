@@ -121,9 +121,15 @@ def entry_to_card(entry: dict, uid: str, kind: str = "entry",
 def import_book(path: str | Path, vault_root: str | Path, *, kind: str = "entry",
                 force: bool = False, schema: sc.CardSchema | None = None) -> dict:
     """Import a lorebook JSON file into the vault. Existing cards are kept unless ``force``."""
+    book = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    return import_book_data(book, vault_root, kind=kind, force=force, schema=schema)
+
+
+def import_book_data(book: Any, vault_root: str | Path, *, kind: str = "entry",
+                     force: bool = False, schema: sc.CardSchema | None = None) -> dict:
+    """Import an already-parsed lorebook (what an upload hands you) into the vault."""
     root = Path(vault_root).expanduser()
     schema = schema or sc.load_schema(root)
-    book = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
     written, skipped, empty = [], [], []
     for uid, entry in _as_entries(book):
         # A card with neither keywords nor a title could never fire; report it instead.
@@ -183,7 +189,7 @@ def export_book(vault_root: str | Path, path: str | Path | None = None, *,
     root = Path(vault_root).expanduser()
     schema = schema or sc.load_schema(root)
     entries: dict[str, dict] = {}
-    for i, p in enumerate(sorted(root.rglob("*.md"))):
+    for i, p in enumerate(engine.iter_card_files(root)):
         rel = str(p.relative_to(root))
         if kind and schema.kind_of_rel(rel) != kind:
             continue

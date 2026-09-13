@@ -245,3 +245,46 @@ def test_candidates_skip_subjects_that_already_have_a_card(vault):
     debug = engine.consult("Alice met Dolores at the office", vault, dry_run=True)["debug"]
     names = debug["candidates"]["names"]
     assert "Dolores" in names and not any(n.lower() == "alice" for n in names)
+
+
+# --------------------------------------------------------------------------- private sections
+
+
+def test_private_sections_never_reach_a_model_but_stay_on_the_card(vault):
+    path = write_card(vault, "people", "Carol", keywords=["Carol"],
+                      fields={"who": "Carol runs the reading group.",
+                              "correspondence": "Draft: ask about the Tuesday book. "
+                                                "Her address is on the envelope."})
+    raw = path.read_text(encoding="utf-8")
+    assert "## correspondence" in raw and "Tuesday book" in raw     # written to disk in full
+
+    card = engine.consult("what did Carol say", vault)["hits"][0]
+    assert "reading group" in card.body
+    assert "correspondence" not in card.body and "Tuesday book" not in card.body
+
+    # ...and the words in there do not make the card fire either
+    assert keys(engine.consult("anything about the Tuesday book?", vault)) == []
+
+    detail = engine.card_detail(vault, "people", "Carol")
+    assert detail["fields"]["correspondence"].startswith("Draft: ask")
+    assert "Tuesday book" in engine.read_card(vault, "Carol")["text"]
+
+
+def test_private_sections_survive_an_edit(vault):
+    write_card(vault, "people", "Carol", keywords=["Carol"],
+               fields={"who": "Carol runs the reading group.", "correspondence": "Draft: hello."})
+    engine.upsert_card(vault, "people", "Carol",
+                       {"keywords": ["Carol"], "fields": {"who": "Carol runs it.",
+                                                          "correspondence": "Draft: hello."}})
+    assert "Draft: hello." in engine.read_card(vault, "Carol")["text"]
+
+
+def test_private_sections_are_configurable(vault):
+    (vault / "kinds.yaml").write_text("private_sections: [scratch]\n", encoding="utf-8")
+    write_card(vault, "entry", "note", keywords=["kraken"],
+               body="the kraken is real\n\n## scratch\nmy private doubts\n\n## after\nvisible")
+    engine.invalidate_cache()
+    card = engine.consult("kraken", vault)["hits"][0]
+    assert "private doubts" not in card.body and "visible" in card.body
+    # correspondence is no longer private once the config names something else
+    assert "scratch" not in card.body

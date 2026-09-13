@@ -77,6 +77,9 @@ DEFAULT_WHO_SECTION: dict[str, str | None] = {
     "entry": None,
 }
 
+#: Sections kept on the card but never injected or matched on: private working notes.
+DEFAULT_PRIVATE_SECTIONS: tuple[str, ...] = ("correspondence",)
+
 RECENT_MAX_CHARS = 600
 WHO_LINE_MAX_CHARS = 120
 DEFAULT_SCAN_DEPTH = 3
@@ -110,6 +113,7 @@ class CardSchema:
     recent_section: dict[str, str | None] = field(default_factory=lambda: dict(DEFAULT_RECENT_SECTION))
     who_section: dict[str, str | None] = field(default_factory=lambda: dict(DEFAULT_WHO_SECTION))
     generic_keywords: frozenset[str] = GENERIC_KEYWORDS
+    private_sections: tuple[str, ...] = DEFAULT_PRIVATE_SECTIONS
 
     @property
     def dir_to_kind(self) -> dict[str, str]:
@@ -127,7 +131,13 @@ class CardSchema:
         return f"{directory}/{key}.md" if directory else f"{key}.md"
 
     def sections_for(self, kind: str) -> list[str]:
+        """The sections of this kind that are injected when the card fires."""
         return list(self.sections.get(kind, []))
+
+    def all_sections_for(self, kind: str) -> list[str]:
+        """Injected sections plus the private ones, which are edited but never injected."""
+        names = self.sections_for(kind)
+        return names + [n for n in self.private_sections if n not in names] if names else names
 
     def recent_for(self, kind: str) -> str | None:
         name = self.recent_section.get(kind)
@@ -180,13 +190,17 @@ def load_schema(vault_root: str | Path) -> CardSchema:
         if kind in who:
             who[kind] = str(name).strip() or None if name is not None else None
 
+    private = DEFAULT_PRIVATE_SECTIONS
+    if isinstance(raw.get("private_sections"), list):
+        private = tuple(str(n).strip() for n in raw["private_sections"] if str(n).strip())
+
     generic = GENERIC_KEYWORDS
     extra = raw.get("generic_keywords")
     if isinstance(extra, list):
         generic = frozenset(GENERIC_KEYWORDS | {str(w).strip().casefold() for w in extra if str(w).strip()})
 
     return CardSchema(kind_dirs=dirs, sections=sections, recent_section=recent,
-                      who_section=who, generic_keywords=generic)
+                      who_section=who, generic_keywords=generic, private_sections=private)
 
 
 # --------------------------------------------------------------------------- keys
@@ -299,7 +313,7 @@ def split_sections(body: str, kind: str, schema: CardSchema = DEFAULT_SCHEMA) ->
     table are kept verbatim in ``_extra`` so nothing is ever lost. Text before the first
     heading goes to ``_head``. ``entry`` cards are not split: everything is ``_head``.
     """
-    names = schema.sections_for(kind)
+    names = schema.all_sections_for(kind)
     out: dict[str, str] = {n: "" for n in names}
     if not names:
         out["_head"] = body.strip()
@@ -323,17 +337,50 @@ def split_sections(body: str, kind: str, schema: CardSchema = DEFAULT_SCHEMA) ->
 def render_sections(kind: str, fields: dict[str, str], schema: CardSchema = DEFAULT_SCHEMA) -> str:
     """``{name: text}`` -> body text. Section order is the table's; empty sections keep their
     heading so there is an obvious place to write. ``_head`` leads, ``_extra`` trails."""
-    names = schema.sections_for(kind)
+    names = schema.all_sections_for(kind)
     parts: list[str] = []
     head = (fields.get("_head") or "").strip()
     if head:
         parts.append(head)
     for n in names:
-        parts.append(f"## {n}\n{(fields.get(n) or '').strip()}".rstrip())
+        text = (fields.get(n) or "").strip()
+        if not text and n in schema.private_sections and n not in schema.sections_for(kind):
+            continue   # do not stamp an empty private heading onto every card
+        parts.append(f"## {n}\n{text}".rstrip())
     extra = (fields.get("_extra") or "").strip()
     if extra:
         parts.append(extra)
     return "\n\n".join(parts).strip() + "\n"
+
+
+def strip_private(body: str, schema: CardSchema = DEFAULT_SCHEMA) -> str:
+    """Remove every private section from a body. What is left is what may be injected.
+
+    Works on any card, sectioned or free-form: a ``## correspondence`` heading in a
+    free-form entry is cut just the same, down to the next heading or the end.
+    """
+    if not schema.private_sections:
+        return body
+    private = {n.strip().casefold() for n in schema.private_sections}
+    matches = list(_SECTION_RE.finditer(body))
+    if not matches:
+        return body
+    keep: list[tuple[int, int]] = []
+    cut_from = None
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        if m.group(1).strip().casefold() in private:
+            if cut_from is None:
+                cut_from = m.start()
+            continue
+        if cut_from is not None:
+            keep.append((cut_from, m.start()))
+            cut_from = None
+    if cut_from is not None:
+        keep.append((cut_from, len(body)))
+    for start, end in reversed(keep):
+        body = body[:start] + body[end:]
+    return body
 
 
 def render_card(*, kind: str, key: str, fields: dict[str, str], keywords: list[str],

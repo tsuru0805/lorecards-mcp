@@ -2,7 +2,9 @@
 
 [English](README.md) · 中文
 
-给陪伴型 agent 用的**卡片世界书**，靠关键词触发。你提过的每一个人、每件事、每个地方、每样东西、你们之间的每个梗，各是一张卡——纯 Markdown 加 YAML 头，放在你自己的文件夹里。对话里提到某张卡的关键词（看的是最近几轮，不只是当前这一句），那张卡就浮现出来。于是第二次聊到某个朋友、某件说了一半的事，AI 已经知道谁是谁，没人需要再来一遍「前情提要」。
+给陪伴型 agent 用的**卡片世界书**，靠关键词触发。你提过的每一个人、每件事、每个地方、每样东西、你们之间的每个梗，各是一张卡——纯 Markdown 加 YAML 头，放在你自己的文件夹里。对话里提到某张卡的关键词（看的是最近几轮，不只是当前这一句），那张卡就**在模型看到之前被写进 prompt**。于是第二次聊到某个朋友、某件说了一半的事，AI 已经知道谁是谁，没人需要再来一遍「前情提要」。
+
+浮现这件事不指望模型自己记得做。挡在 API 前面的代理，或者 Claude Code 里的 hook，会替你注入——和世界书本来的做法一样。又因为一张每轮都命中的卡会被每轮计费，每段会话都记一本小账，同一张卡隔几轮之内不会重复注入，见[去重](#去重)。
 
 它不是 RAG，也不是记忆库。没有向量、没有相似度打分、没有背着你偷偷写的东西。卡片书是**正典**：你（或者 agent 通过 `write_card` 工具）决定值得记住的东西，放在你看得见、改得了、删得掉的文件里。
 
@@ -17,44 +19,63 @@
 
 ## 安装
 
-两条接法，互不依赖——挑一条，或者两条都用。
+```bash
+pipx install lorecards-mcp        # 或者 uv tool install lorecards-mcp
+lorecards init ~/cards            # 建目录，每种卡各放一张示例
+```
 
-### 1. 当 MCP server 用（任何 MCP 客户端）
+然后挑一条路让卡片进到模型面前。三条路互不依赖。
+
+### 1. 网关（主推）
+
+一个挡在你的 API 前面、把卡片写进 prompt 的代理。**任何能改 base URL 的客户端都能用：SillyTavern、Kelivo、PWA、SwiftUI app、你自己的脚本**——它们都不需要知道 lorecards 存在。
 
 ```bash
-# Claude Code
-claude mcp add lorecards -- uvx lorecards-mcp --vault ~/cards
-
-# 或者直接跑
-uvx lorecards-mcp --vault ~/cards
-pipx run lorecards-mcp --vault ~/cards      # 不用 uv 的同款
+lorecards gateway --vault ~/cards --upstream https://api.openai.com
+#   -> 客户端填这个 base URL: http://127.0.0.1:8765/v1
 ```
 
-Claude Desktop——`claude_desktop_config.json`：
+在客户端里把 API base URL 从 `https://api.openai.com/v1` 改成 `http://127.0.0.1:8765/v1`，其它什么都别动——你的 key 仍然原样直达上游，不落盘、不打日志。
 
-```json
-{
-  "mcpServers": {
-    "lorecards": {
-      "command": "uvx",
-      "args": ["lorecards-mcp", "--vault", "/Users/you/cards"]
-    }
-  }
-}
+- **SillyTavern**：API Connections → Chat Completion → Custom (OpenAI-compatible) → Custom Endpoint 填 `http://127.0.0.1:8765/v1`；API key 还填在原来那一栏。
+- **Kelivo**（以及大多数手机客户端）：设置 → 服务商 → 该服务商的 *API base URL* → `http://127.0.0.1:8765/v1`。手机上把 `127.0.0.1` 换成电脑的局域网地址，并用 `--host 0.0.0.0` 启动网关。
+
+两种协议都接，含流式：`POST /v1/chat/completions`（OpenAI 兼容）和 `POST /v1/messages`（Anthropic Messages）。其它路径原样转发。
+
+```console
+$ curl -s http://127.0.0.1:8765/v1/chat/completions -D- \
+    -H 'Authorization: Bearer sk-…' -H 'Content-Type: application/json' \
+    -d '{"model":"gpt-4o","messages":[{"role":"user","content":"how did the friday deploy go?"}]}'
+x-lorecards-injected: the Friday deploy
+…
+# 上游实际收到的最后一条 user 消息：
+# <!-- lorecards -->
+# A memory surfaces:
+#
+# ### the Friday deploy [event]
+# ## when
+# Every Friday afternoon, since the team moved to weekly releases.
+# …
+# <!-- /lorecards -->
+#
+# how did the friday deploy go?
 ```
 
-中文（或任何词与词之间没有空格的语言）要装分词扩展：
-`uvx --from 'lorecards-mcp[zh]' lorecards-mcp --vault ~/cards`。`mcp` Python SDK 1.x 和 2.x 都能跑。
+| 参数 | 默认 | 作用 |
+| --- | --- | --- |
+| `--upstream` | *必填* | 挡在哪个 API 前面 |
+| `--host` / `--port` | `127.0.0.1` / `8765` | 代理监听在哪 |
+| `--inject` | `user` | `user`＝插在最后一条 user 消息前面；`system`＝追加一条 system 消息（OpenAI）／拼进 `system` 字段（Anthropic） |
+| `--window` | `3` | 往回扫几轮 |
+| `--reinject-after` | `6` | 同一张卡隔几轮才允许再注入（`0`＝每次都注） |
+| `--budget` | `800` | 单次注入的字数预算 |
+| `--framing` | `"A memory surfaces:\n\n"` | 领起卡片的那句话 |
 
-Claude Code 里新加的 MCP server 要审批一次——在那个项目里起一次 `claude`，批准它。
+注入的内容用 `<!-- lorecards -->` 包起来，下一轮扫描时会被剥掉——否则卡片会靠复述自己的关键词让自己永远留在场上。我们这边任何一环出问题（vault 读不了、请求体形状不对），请求都原样转发：代理永远不挡在你和模型之间。
 
-**这条路的局限：** 卡要浮现，得靠模型自己去调 `recall_cards`。它不调，什么都不会发生。给它一条常驻指令——放 system prompt 或 `CLAUDE.md`：
+### 2. Claude Code hook
 
-> 回答之前，如果这条消息提到了某个人、某个地方、某件事或某个说法，可能已经在卡片书里，就把用户这条消息和最近几轮一起交给 `recall_cards`。它很便宜，没命中就返回空。
-
-### 2. 当 Claude Code 的 hook 用（每轮都触发，不用模型调工具）
-
-这条路会自动把命中的卡注入进去，等价于系统侧的世界书注入。写进 `.claude/settings.json`：
+同一个思路，在 Claude Code 里：每轮都触发，不用模型调工具。写进 `.claude/settings.json`：
 
 ```json
 {
@@ -70,28 +91,79 @@ Claude Code 里新加的 MCP server 要审批一次——在那个项目里起�
 }
 ```
 
-`lorecards hook` 从 stdin 读 hook 的 JSON（`user_prompt`，还有 `transcript_path` 用来取最近几轮），用 `hookSpecificOutput.additionalContext` 回答。没有卡命中时退出码 0、什么都不打印；它永远不会拦住一条 prompt——vault 坏了你损失的是卡，不是这一轮对话。（hook 契约按 Claude Code 官方文档，2026-09-13 核过。）
+`lorecards hook` 从 stdin 读 hook JSON（`user_prompt`，以及 `transcript_path` 用来取最近几轮），用 `hookSpecificOutput.additionalContext` 回话。没命中就 exit 0 不输出，任何情况下都不会拦掉你的 prompt。去重上，一个 Claude Code session 算一段会话（按 `session_id`）。（hook 契约按 Claude Code 官方文档，2026-09-13 核对。）
 
-这条命令需要 `lorecards` 在 PATH 上：`uv tool install lorecards-mcp`，或 `pipx install lorecards-mcp`，或者把 hook 指到某个 virtualenv：
-`command: "/path/to/.venv/bin/lorecards hook --vault ~/cards"`。
+### 3. MCP server —— 用来**写**卡
+
+```bash
+claude mcp add lorecards -- lorecards-mcp --vault ~/cards
+```
+
+```json
+{
+  "mcpServers": {
+    "lorecards": { "command": "lorecards-mcp", "args": ["--vault", "/Users/you/cards"] }
+  }
+}
+```
+
+三个工具：`write_card`、`read_card`、`list_cards`。这是 agent 把刚知道的事记下来的通道——`mode="create"` 新建，`mode="update_recent"` 只刷新「最近」那一段。
+
+**故意没有召回工具。** 让模型自己决定要不要查，多数时候它不会查；世界书之所以有用，正是因为浮现这件事不归模型管。召回是网关和 hook 的活。
+
+`lorecards-mcp` 默认走 stdio，`--http` 改成 streamable HTTP。`mcp` SDK 1.x 和 2.x 都能跑。
 
 ### 从源码装
 
 ```bash
 git clone https://github.com/tsuru0805/lorecards-mcp && cd lorecards-mcp
 python3 -m venv .venv && .venv/bin/pip install -e '.[zh]'
-.venv/bin/lorecards-mcp --vault ~/cards        # MCP server
-.venv/bin/lorecards try "hello" --vault ~/cards
+.venv/bin/lorecards ui --vault ~/cards
 ```
 
-MCP 配置或 hook 命令里写 `.venv/bin/lorecards-mcp` / `.venv/bin/lorecards` 的绝对路径。
+中文（以及任何词间不留空格的语言）请装 `[zh]` extra，用 jieba 分词。
 
-### 建一个 vault
+## 网页编辑器
+
+手写 YAML 很快就会烦。所以有个编辑器：
 
 ```bash
-lorecards init ~/cards      # 建目录，每种卡放一张示例
-lorecards try "how did the friday deploy go" --vault ~/cards
+lorecards ui --vault ~/cards          # -> http://localhost:8766
 ```
+
+一页：左边按种类列卡，右边是**按你实际的段落表**生成的表单，顶上有「试一句」——输入一句话就能看到哪些卡会浮现、命中了哪些词，还没建卡的专名可以一键加成关键词；下面是「最近浮现」和「体检」两个折叠区。SillyTavern 世界书的导入导出也在同一页。手机竖屏能用，带 web manifest 可以「添加到主屏幕」，并且**不加载任何外部资源**。
+
+手机在同一个 Wi-Fi 下访问：
+
+```bash
+lorecards ui --vault ~/cards --host 0.0.0.0 --token "$(openssl rand -hex 16)"
+# 打开 http://<你电脑的局域网地址>:8766/?token=<刚才那串>
+```
+
+`--host` 只要不是 localhost 就**必须**带 `--token`，API 按 `Authorization: Bearer <token>` 校验（链接里的 `?token=` 由网页存下来，之后都走请求头）。本机访问则完全没有鉴权：能连上这个端口的人就能改 vault。
+
+*（截图：稍后补。）*
+
+## HTTP API
+
+网页只是其中一个客户端。它做的每件事都有对应接口，PWA / SwiftUI app / shell 脚本照样能做。错误统一是 `{"error": 代码, "detail": 说明}`。
+
+| 方法 | 路径 | 作用 |
+| --- | --- | --- |
+| `GET` | `/api/kinds` | 段落表、目录名、私有段——表单请按它渲染，别在前端硬编码段名 |
+| `GET` | `/api/cards?kind=&archived=` | 列表：key / kind / title / keywords / aliases / enabled / inject / preview / mtime |
+| `GET` | `/api/cards/{kind}/{key}` | 整张卡：frontmatter 各键、`fields`（段→文）、`extra`、`mtime` |
+| `POST` | `/api/cards` | 建卡；重名回 `409` |
+| `PUT` | `/api/cards/{kind}/{key}` | 更新；把读到的 `mtime` 一起回传，中途被人改过就回 `409` 并附上当前版本 |
+| `DELETE` | `/api/cards/{kind}/{key}` | 移到 `_archive/`——磁盘上永远不真删 |
+| `POST` | `/api/cards/{kind}/{key}/restore` | 取回来 |
+| `POST` | `/api/try` | 干跑：哪些卡命中、命中哪些词、在不在预算内，外加候选关键词。加 `?log=1` 才记账 |
+| `GET` | `/api/recent?limit=` | 最近浮现了什么（网关、hook，以及记了账的试一句） |
+| `GET` | `/api/checkup` | 没关键词的卡、泛到每轮都命中的词、标题与文件名不一致 |
+| `POST` | `/api/import` | `{"book": <SillyTavern JSON>, "kind": "entry", "force": false}` |
+| `GET` | `/api/export` | 整个 vault 导成 SillyTavern 世界书 |
+
+`mtime` 是**字符串**：它是纳秒精度，当 JSON 数字进浏览器会掉精度，那样乐观锁每次都会误判。
 
 ## 卡的格式
 
@@ -122,50 +194,70 @@ Took over the refund flow rewrite in September.
 Direct, allergic to meetings that could have been a message.
 ```
 
-**目录**决定卡的种类；头里的 `kind:` 只是副本。各种卡的段落：
+**目录决定 kind**，frontmatter 里的 `kind:` 只是副本。各 kind 的段落：
 
-| 种类 | 目录 | 段落 |
+| kind | 目录 | 段落 |
 | --- | --- | --- |
-| people 人物 | `people/` | who 谁是谁 · stance 态度 · recent 最近 · impression 印象 |
-| event 事件 | `events/` | when 时间 · who 涉及谁 · what 经过 · stance 态度 · followup 后续 |
-| place 地点 | `places/` | where 在哪 · relation 关系 · recent 最近 |
-| thing 物件 | `things/` | what 是什么 · usage 怎么用 · recent 最近 |
-| slang 梗 | `slang/` | meaning 意思 · origin 出处 · usage 用法 |
-| entry 普通条目 | vault 根目录 | 自由正文 |
+| people | `people/` | who · stance · recent · impression |
+| event | `events/` | when · who · what · stance · followup |
+| place | `places/` | where · relation · recent |
+| thing | `things/` | what · usage · recent |
+| slang | `slang/` | meaning · origin · usage |
+| entry | vault 根目录 | 自由正文 |
 
-你自己加的、不在表里的标题原样保留，永远不会被丢掉。YAML 头是宽容解析的：`keywords: Alice, Bob` 和正规的列表一样认，值写坏了就退回默认，不会把整张卡搞坏。
+你自己加的、不在表里的 `##` 标题会原样保留，不会被丢掉。frontmatter 解析很宽容：`keywords: Alice, Bob` 和标准列表一样能用，写坏了就退回默认值，不会让整张卡失效。
 
-目录名和段名都可以改，所以 vault 可以整个用另一种语言写——在 vault 根目录放一个 `kinds.yaml`：
+### 私有段
+
+有些东西该留在卡上，但绝不该进模型——工作笔记、草稿、写信用的备料。凡是 `private_sections` 里列出的段（默认 `correspondence`），都留在文件里、`read_card` 读得到、网页里也能编辑（标着「永不注入」），但会从引擎匹配和注入的内容里整段切掉。里面的词甚至不会让这张卡命中。
+
+### kinds.yaml
+
+目录名和段名都可配置，所以整个 vault 可以用另一种语言写。在 vault 根目录放 `kinds.yaml`：
 
 ```yaml
 dirs:     { people: 人物, event: 事件 }
-sections: { people: [谁是谁, 态度, 最近, 印象] }
+sections: { people: [谁是谁, 关系, 最近, 印象] }
 recent_section: { people: 最近 }
+private_sections: [通信脉络]
 ```
 
 ## 匹配怎么算
 
 | | |
 | --- | --- |
-| **匹配词** | `keywords` + `aliases` + `title`，不分大小写 |
-| **窗口** | 当前这条消息 + 最近 `scan_depth` 轮（默认 3 轮，每轮约两条消息） |
-| **子串还是整词** | 两个字及以上的词允许在词内部命中；单字词必须整个 token 匹配，所以单字关键词不会见字就触发 |
-| **`secondary.all`** | 列出的词必须全部在窗口里出现 |
-| **`secondary.any`** | 至少一个在窗口里出现 |
-| **`secondary.not`** | 只查产生命中的那几条消息，所以三轮前随口提过的排除词不会否掉用户刚点名的卡 |
-| **`refs`** | 只向下一层：被引用的卡贡献一行（「这是谁」），不带整张正文；它自己已经命中时就不重复 |
-| **分数** | 命中的不同词的个数，*当前消息*里命中的每个词再加一分 |
-| **顺序** | 分数降序，再按 `priority` 降序，再按标题 |
-| **预算** | 默认 800 字符。第一张卡永远进，哪怕超预算；第一张放不下的卡就停，后面的在 `truncated` 里报个数 |
-| **`enabled: false`** | 根本不加载。**`inject: true/false`**——`false` 时 `read_card` / `list_cards` 还读得到，只是不进自动召回 |
+| **匹配词** | `keywords` ∪ `aliases` ∪ `title`，不分大小写 |
+| **窗口** | 当前这句 + 最近 `scan_depth` 轮（默认 3 轮，每轮约 2 条） |
+| **子串 vs 整词** | ≥2 字的词允许子串命中；1 字的词必须整词命中，免得单字关键词逢字必中 |
+| **`secondary.all`** | 列出的词必须全都出现在窗口里 |
+| **`secondary.any`** | 至少出现一个 |
+| **`secondary.not`** | 只看**产生命中的那条消息**，三轮前出现过的排除词不会否掉刚被点名的卡 |
+| **`refs`** | 只递归一层：被引用的卡只带出一行「谁是谁」，不是整篇；它自己也命中了就不重复 |
+| **分数** | 命中的不同词数，再加上其中在**当前这句**命中的词数 |
+| **排序** | 分 ↓ → `priority` ↓ → 标题 |
+| **预算** | 默认 800 字。第一条即使超预算也一定注入；之后第一条塞不下就停，剩下的记为 `truncated` |
+| **`enabled: false`** | 完全不加载。**`inject: true/false`**——`false` 表示 `read_card`／网页读得到，但不参与自动浮现 |
 
-中文、日文这类不用空格分词的文字，装了 `[zh]` 扩展就用 [jieba](https://github.com/fxsjy/jieba) 分词。没装的话退化成子串匹配加空白/标点切词：多字词照样能用，单字词基本不行。
+中文、日文这类不用空格分词的语言，装了 `[zh]` extra 就走 jieba 分词。没装则退化成子串匹配 + 空白/标点切词：多字词照样能中，单字词基本中不了。
+
+## 去重
+
+一张连着五轮都命中的卡，如果每轮都注入，就是五倍 token——而它早就还在上下文里了。所以：
+
+- **会话身份**：客户端给了 `X-Lorecards-Conversation` 请求头就用它，否则用 `sha256(system prompt + 第一条 user 消息)[:16]`。在 Claude Code 里是 hook 的 `session_id`。
+- **轮次**：请求里 user 消息的条数（hook 没有请求可数，自己维护一个计数器）。
+- 在第 *n* 轮注入过的卡，直到第 *n + `--reinject-after`* 轮（默认 6）之前都跳过；掉出这个窗口之后再命中才会重新注入。
+- 账本在 `<vault>/.lorecards/injections.json`，原子写，每会话最多 200 张卡、总共 500 段会话（超了按最久未见先淘汰）。
+- 注入了就在响应头带 `X-Lorecards-Injected: key1,key2`，这是看清发生了什么最快的办法。
+- 账本读不出来就当空的重建，请求照常转发。
+
+`--reinject-after 0` 关掉去重，命中就注。
 
 ## 导入 / 导出（SillyTavern 世界书）
 
 ```bash
-lorecards import book.json --vault ~/cards          # 已有的卡保留
-lorecards import book.json --vault ~/cards --force  # 覆盖它们
+lorecards import book.json --vault ~/cards          # 同名卡默认保留不覆盖
+lorecards import book.json --vault ~/cards --force  # 覆盖
 lorecards export out.json --vault ~/cards
 ```
 
@@ -174,24 +266,53 @@ lorecards export out.json --vault ~/cards
 | `key` | `keywords` |
 | `keysecondary` + `selectiveLogic` | `secondary`——`0 AND ANY → any`、`1 AND ALL → all`、`2 NOT ANY → not`、`3 NOT ALL → not` |
 | `comment` | `title` |
-| `content` | 卡的正文 |
+| `content` | 正文 |
 | `order` | `priority` |
-| `scanDepth`（没有就用 `depth`） | `scan_depth` |
-| `disable` | `enabled`，取反 |
-| 其它一切（`constant`、`position`、`probability`、`uid`……） | 原样存在头里的 `st:` 下面，导出时能原样带回去 |
+| `scanDepth`（没有就退到 `depth`） | `scan_depth` |
+| `disable` | `enabled` 取反 |
+| 其余（`constant`、`position`、`probability`、`uid`…） | 原样收在 frontmatter 的 `st:` 下，导出能还原 |
 
-**已知的映射边界**
+**已知映射边界**
 
-- `constant`（常驻条目）**不支持**——卡要么靠关键词触发，要么不触发。这个标记导出时保留，但在本书里不起作用。
-- `3 NOT ALL` 用 `not` 近似，而 `not` 是**任一**词出现就否决。SillyTavern 要**全部**出现才否决，所以导进来的 NOT ALL 条目在这里更严。
-- `scanDepth` 在 SillyTavern 数的是**消息条数**，这里数的是**轮数**，所以导入时减半、导出时加倍；奇数向上取整。
-- `position`、`probability`、`depth`（插入深度）、`group`、`role` 和递归设置没有对应物——只搬运，不生效。
-- 导入把所有条目放进同一种类（`--kind`，默认 `entry`）；分到 people / events / places 里要事后手动整理。
+- `constant`（常驻条目）**不支持**——卡要么靠关键词命中，要么不出现。导出时这个字段原样带回去，但在本项目里不起作用。
+- `3 NOT ALL` 用 `not` 近似：我们是**任一**排除词出现就否掉，SillyTavern 是**全部**出现才否掉，所以导进来的 NOT ALL 条目会比原来更严。
+- `scanDepth` 在 SillyTavern 里数**消息**，在这里数**轮**，所以导入除以 2、导出乘以 2，奇数向上取整。
+- `position`、`probability`、`depth`（插入深度）、`group`、`role`、递归设置没有对应物——只是原样带着，并不生效。
+- 导入会把所有条目放进同一个 kind（`--kind`，默认 `entry`）；要分门别类得事后手动挪。
+
+## 和笔友系统配套
+
+如果你的 AI 真的在写信，people 卡是放通讯录的好地方——它本来就是「谁是谁」的那张卡。两个约定：
+
+```markdown
+---
+kind: people
+title: Alice
+keywords: [Alice]
+emails: [alice@example.com]          # 简单的卡
+ais:                                 # …或者一张卡管好几个 AI 人格
+  - name: Aria
+    emails: [aria@example.com, aria.work@example.com]
+---
+## who
+Alice — works on the payments team.
+
+## correspondence
+Last letter went out on the 3rd; she asked about the refund rewrite.
+Draft: answer the rewrite question, ask about the reading group.
+```
+
+- `emails:` / `ais[].emails` 这些列表就是**发信白名单的唯一来源**——地址不在卡上，就谁也不许往那儿发。放在这里，意味着白名单和它所属的那段关系在同一个地方维护。
+- `## correspondence` 是[私有段](#私有段)：读这张卡的模型永远看不到，写回信时邮件系统才会专门去读。一段长期通信之所以不会无限膨胀进 prompt，靠的就是这条。
+
+这套设计的完整说明在这里：[AI 笔友系统：一套不会无限膨胀的长期通信记忆方案](https://gist.github.com/tsuru0805/d6d3cff55238dd0027cead953c48f206)。
 
 ## 命令行
 
 ```
-lorecards try "sentence"        哪些卡会触发、为什么、还有哪些词看起来值得建卡
+lorecards gateway --upstream URL  注入代理（见「安装」）
+lorecards ui                      网页编辑器 + HTTP API
+lorecards try "一句话"             哪些卡会触发、为什么、还有哪些词看起来值得建卡
   --turns '[{"role":"user","text":"..."}]'   --show-context   --json
 lorecards list [--kind people]  列出所有卡和它们的关键词
 lorecards read Alice            打印一张卡
@@ -202,11 +323,15 @@ lorecards export out.json       导出成 SillyTavern 世界书
 lorecards hook                  Claude Code 的 UserPromptSubmit hook
 ```
 
+`--vault` 放在子命令前后都行；没给就依次取 `$LORECARDS_VAULT`、`~/.lorecards`。
+
 ## 已知局限
 
-- **MCP 那条路取决于模型愿不愿意调 `recall_cards`。** 只有 hook 那条路每轮必触发。
 - 匹配的是关键词，不是语义。「我姐」找不到标题叫 `Rin` 的卡，除非 `我姐` 在它的关键词或别名里。这是刻意的取舍：可预测、可审计、不用跑向量。
-- 一个 server 进程一个 vault。多个角色或多套人设就在 MCP 配置里写多条，各自一个 `--vault`。
+- 网关必须读得懂请求体才能注入，所以只处理它认得的 JSON 聊天请求，其余就是普通代理。
+- 去重按上面那套会话身份来。客户端如果每次请求都换 system prompt，又不带 `X-Lorecards-Conversation` 头，那每次都会被当成新会话。
+- **网页编辑器没有多用户、没有权限概念**：一个 vault、一个编辑者、没有操作记录；本机访问时完全没有鉴权。它是给「卡就是你自己的」那个人用的工具。
+- 一个进程一个 vault。多个角色或多套人设就开多个网关，或者在 MCP 配置里写多条，各自一个 `--vault`。
 - 卡按文件的 mtime 和大小缓存，所以用编辑器改了卡，下次查询就生效——但一次改动如果两者都没变，是不会被察觉的。
 - `write_card(mode="update_recent")` 写之前会再核一次文件 mtime，文件在它读写之间变过就拒绝。这不是锁：两个 agent 在同一毫秒写同一张卡不在设计范围内。
 - 没有分页：书很大时，每次查询仍然把全部卡加载进内存。
@@ -215,5 +340,3 @@ lorecards hook                  Claude Code 的 UserPromptSubmit hook
 
 - **晚晚**（[@tsuru0805](https://github.com/tsuru0805)）——设计、拍板、真场验收。
 - **弥野**（Claude，晚晚的工程手）——实现与文档。
-
-从 tilldusk 家庭系统里跑着的那套卡片世界书 clean-room 抽出。MIT 许可。

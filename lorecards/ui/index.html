@@ -1,0 +1,913 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>lorecards</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="theme-color" content="#1b1e24">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<style>
+:root{
+  --bg:#f6f6f4; --panel:#fff; --ink:#1c1f24; --muted:#6b7280; --line:#e3e3df;
+  --accent:#3d6a8f; --accent-soft:#e8f0f6; --warn:#9a6b12; --warn-soft:#fdf4e0;
+  --radius:10px; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#16181c;--panel:#1e2126;--ink:#e8e8e4;--muted:#9aa1ab;--line:#2c3037;
+        --accent:#7fa9cd;--accent-soft:#22303c;--warn:#d8b05a;--warn-soft:#332c1b;}
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);
+     -webkit-text-size-adjust:100%}
+button,input,textarea,select{font:inherit;color:inherit}
+button{cursor:pointer;background:var(--panel);border:1px solid var(--line);
+       border-radius:var(--radius);padding:6px 12px}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.ghost{background:transparent;border-color:transparent;color:var(--muted);padding:4px 8px}
+button.ghost:hover{color:var(--accent)}
+input[type=text],input[type=number],textarea,select{
+  width:100%;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--radius);padding:8px 10px}
+textarea{resize:vertical;min-height:60px;overflow:hidden}
+input:focus,textarea:focus,select:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+a{color:var(--accent)}
+
+header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--line);
+       padding:10px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+header h1{font-size:16px;margin:0;letter-spacing:.02em}
+header .vault{color:var(--muted);font-size:12px;font-family:var(--mono);
+              overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:32ch}
+header .spacer{flex:1}
+.tryrow{display:flex;gap:8px;flex:1 1 320px;min-width:220px}
+.tryrow input{flex:1}
+
+nav{display:flex;gap:6px;padding:10px 16px 0;flex-wrap:wrap}
+nav button{border-radius:999px;padding:4px 12px;font-size:13px}
+nav button[aria-selected=true]{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
+nav .count{color:var(--muted);font-size:11px;margin-left:4px}
+
+main{display:grid;grid-template-columns:minmax(240px,340px) 1fr;gap:16px;padding:16px;
+     align-items:start;max-width:1400px;margin:0 auto}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px}
+.panel h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+          margin:0 0 10px}
+
+.cardlist{list-style:none;margin:0;padding:0;max-height:70vh;overflow:auto}
+.cardlist li{border-bottom:1px solid var(--line)}
+.cardlist li:last-child{border-bottom:0}
+.cardlist button{width:100%;text-align:left;border:0;border-radius:8px;background:transparent;padding:9px 8px}
+.cardlist button:hover{background:var(--accent-soft)}
+.cardlist button[aria-current=true]{background:var(--accent-soft);box-shadow:inset 2px 0 0 var(--accent)}
+.cardlist .t{font-weight:600}
+.cardlist .kw{color:var(--muted);font-size:12px;margin-top:2px;
+              overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.badge{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);
+       border:1px solid var(--line);border-radius:999px;padding:0 6px;margin-left:6px}
+.badge.off{color:var(--warn);border-color:var(--warn)}
+
+.field{margin-bottom:14px}
+.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px;
+             text-transform:uppercase;letter-spacing:.05em}
+.field .hint{font-size:12px;color:var(--muted);margin-top:4px}
+.row{display:flex;gap:12px;flex-wrap:wrap}
+.row .field{flex:1 1 160px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;background:var(--panel);border:1px solid var(--line);
+       border-radius:var(--radius);padding:6px}
+.chips input{border:0;flex:1;min-width:8ch;padding:2px 4px;background:transparent}
+.chips input:focus{outline:0}
+.chip{display:inline-flex;align-items:center;gap:5px;background:var(--accent-soft);
+      color:var(--accent);border-radius:999px;padding:2px 6px 2px 10px;font-size:13px}
+.chip button{border:0;background:transparent;color:inherit;padding:0 2px;line-height:1;font-size:15px}
+.refs{display:flex;flex-wrap:wrap;gap:8px}
+.refs label{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--ink);
+            text-transform:none;letter-spacing:0;margin:0}
+.check{display:flex;align-items:center;gap:8px}
+.check label{text-transform:none;letter-spacing:0;color:var(--ink);margin:0;font-size:14px}
+details{border-top:1px solid var(--line);padding-top:10px;margin-top:6px}
+summary{cursor:pointer;color:var(--muted);font-size:13px}
+.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:14px;
+         border-top:1px solid var(--line);padding-top:12px}
+.actions .spacer{flex:1}
+.msg{font-size:13px;color:var(--muted)}
+.msg.err{color:var(--warn)}
+.empty{color:var(--muted);font-size:14px;padding:8px 0}
+
+.trybox{margin:0 16px;max-width:1400px}
+.trybox .hit{display:flex;gap:8px;align-items:baseline;padding:4px 0;border-bottom:1px solid var(--line)}
+.trybox .hit:last-child{border-bottom:0}
+.trybox .hit .t{font-weight:600}
+.trybox .hit .meta{color:var(--muted);font-size:12px}
+.trybox .out{color:var(--warn)}
+.pill{border:1px dashed var(--line);border-radius:999px;padding:2px 9px;font-size:13px;
+      background:transparent;color:var(--muted)}
+.pill:hover{color:var(--accent);border-color:var(--accent)}
+
+.panels{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:0 16px 24px;
+        max-width:1400px;margin:0 auto}
+.panels .panel{padding:10px 14px}
+.log{list-style:none;margin:0;padding:0;font-size:13px;max-height:240px;overflow:auto}
+.log li{padding:5px 0;border-bottom:1px solid var(--line);display:flex;gap:8px;flex-wrap:wrap}
+.log li:last-child{border-bottom:0}
+.log .when{color:var(--muted);font-family:var(--mono);font-size:11px}
+.issue{color:var(--warn)}
+
+.conflict{background:var(--warn-soft);border:1px solid var(--warn);border-radius:var(--radius);
+          padding:12px;margin-top:12px}
+.conflict h3{margin:0 0 8px;font-size:14px}
+.conflict .cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.conflict pre{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px;
+              margin:4px 0 8px;max-height:240px;overflow:auto;font-size:12px;white-space:pre-wrap}
+
+.mobiletabs{display:none;gap:6px;padding:10px 16px 0}
+@media (max-width:480px){
+  main{grid-template-columns:1fr;padding:10px}
+  .panels{grid-template-columns:1fr;padding:0 10px 20px}
+  .conflict .cols{grid-template-columns:1fr}
+  .mobiletabs{display:flex}
+  body[data-pane=list] #editor{display:none}
+  body[data-pane=editor] #list{display:none}
+  header{padding:8px 10px}
+  header .vault{display:none}
+  nav{padding:8px 10px 0}
+  .trybox{margin:0 10px}
+  .cardlist{max-height:none}
+}
+</style>
+</head>
+<body data-pane="list">
+<header>
+  <h1>lorecards</h1>
+  <span class="vault" id="vaultPath"></span>
+  <div class="tryrow">
+    <input type="text" id="tryInput" placeholder="Try a sentence…">
+    <button id="tryBtn">Try</button>
+  </div>
+  <div class="spacer"></div>
+  <button id="newBtn" class="primary">New card</button>
+  <button id="importBtn">Import</button>
+  <button id="exportBtn">Export</button>
+  <input type="file" id="importFile" accept="application/json,.json" hidden>
+</header>
+
+<nav id="kindNav"></nav>
+<div class="mobiletabs">
+  <button data-pane="list" class="primary" id="paneList">List</button>
+  <button data-pane="editor" id="paneEditor">Editor</button>
+</div>
+
+<section class="trybox" id="tryBox" hidden>
+  <div class="panel">
+    <h2 id="tryTitle">Would surface</h2>
+    <div id="tryResult"></div>
+  </div>
+</section>
+
+<main>
+  <section class="panel" id="list">
+    <h2 id="listTitle">Cards</h2>
+    <ul class="cardlist" id="cardList"></ul>
+  </section>
+  <section class="panel" id="editor">
+    <div id="editorBody"><p class="empty" id="emptyHint">Pick a card, or make a new one.</p></div>
+  </section>
+</main>
+
+<div class="panels">
+  <section class="panel">
+    <details id="recentPanel">
+      <summary id="recentSummary">Recently surfaced</summary>
+      <ul class="log" id="recentList"></ul>
+    </details>
+  </section>
+  <section class="panel">
+    <details id="checkPanel">
+      <summary id="checkSummary">Health check</summary>
+      <ul class="log" id="checkList"></ul>
+    </details>
+  </section>
+</div>
+
+<script>
+"use strict";
+
+/* ------------------------------------------------------------------ strings */
+const I18N = {
+  en: {
+    try: "Try", tryPlaceholder: "Try a sentence…", wouldSurface: "Would surface",
+    nothing: "Nothing would surface.", newCard: "New card", importBtn: "Import",
+    exportBtn: "Export", cards: "Cards", pickCard: "Pick a card, or make a new one.",
+    all: "All", archived: "Archived", list: "List", editor: "Editor",
+    name: "Name (file name)", title: "Title", keywords: "Keywords",
+    keywordsHint: "What the card listens for. Press Enter after each one.",
+    aliases: "Aliases", aliasesHint: "Other ways this gets named.",
+    secondary: "Extra conditions", secAll: "all of these present", secAny: "any of these present",
+    secNot: "none of these present", refs: "Related cards",
+    refsHint: "When this card fires, each of these adds one line of context.",
+    priority: "Priority", enabled: "Enabled", inject: "Include in automatic recall",
+    finetune: "Fine tuning", scanDepth: "Turns to look back (blank = default)",
+    save: "Save", saving: "Saving…", saved: "Saved.", del: "Archive", restore: "Restore",
+    deleted: "Moved to the archive.", restored: "Restored.",
+    confirmDelete: "Move this card to the archive? It stays on disk in _archive/.",
+    conflict: "Someone else changed this card", mine: "Yours", theirs: "On disk",
+    keepMine: "Overwrite with mine", takeTheirs: "Load theirs",
+    recent: "Recently surfaced", check: "Health check", noIssues: "Every card looks fine.",
+    noRecent: "Nothing recorded yet.", addKeyword: "Add as keyword",
+    noCards: "No cards here yet.", score: "score", overBudget: "over budget",
+    candidates: "No card yet for:", nameRequired: "A card needs a name.",
+    kw: "keywords", kind: "Kind", body: "Text", importDone: "Imported",
+    notInjected: "kept on the card, never injected",
+    kept: "kept", failed: "Failed", untitled: "untitled", token: "Access token",
+  },
+  zh: {
+    try: "试一句", tryPlaceholder: "试一句话…", wouldSurface: "会浮现",
+    nothing: "这句话不会让任何卡浮现。", newCard: "新建卡", importBtn: "导入",
+    exportBtn: "导出", cards: "卡片", pickCard: "选一张卡，或者新建一张。",
+    all: "全部", archived: "已归档", list: "列表", editor: "编辑",
+    name: "名字（文件名）", title: "标题", keywords: "关键词",
+    keywordsHint: "卡片听哪些词。每输一个按回车。",
+    aliases: "别名", aliasesHint: "同一个人/物的其它叫法。",
+    secondary: "附加条件", secAll: "这些词全都出现", secAny: "这些词任一出现",
+    secNot: "这些词都不出现", refs: "相关卡",
+    refsHint: "这张卡浮现时，勾选的卡各带出一行。",
+    priority: "优先级", enabled: "启用", inject: "参与自动浮现",
+    finetune: "细调", scanDepth: "往回看几轮（留空＝默认）",
+    save: "保存", saving: "保存中…", saved: "已保存。", del: "归档", restore: "取回",
+    deleted: "已移到归档。", restored: "已取回。",
+    confirmDelete: "把这张卡移到归档？文件仍在 _archive/ 里，不会真删。",
+    conflict: "这张卡在别处被改过", mine: "你的版本", theirs: "磁盘上的版本",
+    keepMine: "用我的覆盖", takeTheirs: "load 对方的",
+    recent: "最近浮现", check: "体检", noIssues: "所有卡都没问题。",
+    noRecent: "还没有记录。", addKeyword: "加为关键词",
+    noCards: "这里还没有卡。", score: "分", overBudget: "超预算",
+    candidates: "还没有卡的词：", nameRequired: "卡片需要一个名字。",
+    kw: "关键词", kind: "种类", body: "正文", importDone: "已导入",
+    notInjected: "留在卡上，永不注入",
+    kept: "保留", failed: "失败", untitled: "未命名", token: "访问令牌",
+  }
+};
+const LANG = (navigator.language || "en").toLowerCase().startsWith("zh") ? "zh" : "en";
+const T = I18N[LANG];
+const KIND_LABEL = {
+  en: {people:"People", event:"Events", place:"Places", thing:"Things", slang:"Slang", entry:"Notes"},
+  zh: {people:"人", event:"事", place:"地点", thing:"物件", slang:"黑话", entry:"条目"}
+}[LANG];
+
+/* ------------------------------------------------------------------ api */
+const params = new URLSearchParams(location.search);
+if (params.get("token")) {
+  try { localStorage.setItem("lorecards_token", params.get("token")); } catch (e) {}
+}
+function token() {
+  try { return localStorage.getItem("lorecards_token") || ""; } catch (e) { return ""; }
+}
+async function api(path, options) {
+  const opts = Object.assign({headers: {}}, options || {});
+  if (opts.body !== undefined && typeof opts.body !== "string") {
+    opts.body = JSON.stringify(opts.body);
+    opts.headers["Content-Type"] = "application/json";
+  }
+  if (token()) opts.headers["Authorization"] = "Bearer " + token();
+  const res = await fetch(path, opts);
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (e) { data = {error: "bad_response", detail: text}; }
+  if (!res.ok) { const err = new Error((data && data.detail) || res.statusText);
+                 err.status = res.status; err.data = data || {}; throw err; }
+  return data;
+}
+
+/* ------------------------------------------------------------------ state */
+const state = {kinds: [], sections: {}, private: {}, cards: [], archived: [], filter: "all",
+               selected: null, detail: null, dirty: false};
+const $ = (id) => document.getElementById(id);
+
+function applyStrings() {
+  $("tryInput").placeholder = T.tryPlaceholder;
+  $("tryBtn").textContent = T.try;
+  $("newBtn").textContent = T.newCard;
+  $("importBtn").textContent = T.importBtn;
+  $("exportBtn").textContent = T.exportBtn;
+  $("listTitle").textContent = T.cards;
+  $("tryTitle").textContent = T.wouldSurface;
+  $("emptyHint").textContent = T.pickCard;
+  $("recentSummary").textContent = T.recent;
+  $("checkSummary").textContent = T.check;
+  $("paneList").textContent = T.list;
+  $("paneEditor").textContent = T.editor;
+  document.documentElement.lang = LANG;
+}
+
+/* ------------------------------------------------------------------ list */
+function currentRows() {
+  if (state.filter === "archived") return state.archived;
+  if (state.filter === "all") return state.cards;
+  return state.cards.filter((c) => c.kind === state.filter);
+}
+
+function renderNav() {
+  const nav = $("kindNav");
+  nav.textContent = "";
+  const entries = [["all", T.all]].concat(state.kinds.map((k) => [k.kind, KIND_LABEL[k.kind] || k.kind]));
+  entries.push(["archived", T.archived]);
+  for (const [value, label] of entries) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    const n = value === "all" ? state.cards.length
+            : value === "archived" ? state.archived.length
+            : state.cards.filter((c) => c.kind === value).length;
+    const span = document.createElement("span");
+    span.className = "count"; span.textContent = n;
+    b.appendChild(span);
+    b.setAttribute("aria-selected", String(state.filter === value));
+    b.onclick = () => { state.filter = value; renderNav(); renderList(); };
+    nav.appendChild(b);
+  }
+}
+
+function renderList() {
+  const ul = $("cardList");
+  ul.textContent = "";
+  const rows = currentRows();
+  if (!rows.length) {
+    const li = document.createElement("li");
+    li.innerHTML = '<p class="empty"></p>';
+    li.querySelector("p").textContent = T.noCards;
+    ul.appendChild(li);
+    return;
+  }
+  for (const row of rows) {
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    const t = document.createElement("div");
+    t.className = "t";
+    t.textContent = row.title || row.key;
+    if (state.filter === "all" || state.filter === "archived") {
+      const badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = KIND_LABEL[row.kind] || row.kind;
+      t.appendChild(badge);
+    }
+    if (row.enabled === false || row.inject === false) {
+      const badge = document.createElement("span");
+      badge.className = "badge off";
+      badge.textContent = row.enabled === false ? T.enabled + ": ✗" : "inject: ✗";
+      t.appendChild(badge);
+    }
+    const kw = document.createElement("div");
+    kw.className = "kw";
+    kw.textContent = (row.keywords || []).join(" · ") || row.preview || "";
+    b.append(t, kw);
+    b.setAttribute("aria-current", String(state.selected === row.kind + "/" + row.key));
+    b.onclick = () => openCard(row.kind, row.key, row.archived);
+    li.appendChild(b);
+    ul.appendChild(li);
+  }
+}
+
+/* ------------------------------------------------------------------ chips */
+function chipsField(labelText, values, hint) {
+  const wrap = document.createElement("div");
+  wrap.className = "field";
+  const label = document.createElement("label");
+  label.textContent = labelText;
+  const box = document.createElement("div");
+  box.className = "chips";
+  const input = document.createElement("input");
+  input.type = "text";
+  const list = values.slice();
+  function redraw() {
+    box.textContent = "";
+    list.forEach((v, i) => {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.textContent = v;
+      const x = document.createElement("button");
+      x.type = "button"; x.textContent = "×";
+      x.onclick = () => { list.splice(i, 1); redraw(); markDirty(); };
+      chip.appendChild(x);
+      box.appendChild(chip);
+    });
+    box.appendChild(input);
+  }
+  function add(raw) {
+    raw.split(/[,、，]/).map((s) => s.trim()).filter(Boolean).forEach((v) => {
+      if (!list.includes(v)) list.push(v);
+    });
+    input.value = ""; redraw(); markDirty();
+  }
+  input.onkeydown = (e) => {
+    if (e.key === "Enter" || e.key === ",") { e.preventDefault(); if (input.value.trim()) add(input.value); }
+    else if (e.key === "Backspace" && !input.value && list.length) { list.pop(); redraw(); markDirty(); }
+  };
+  input.onblur = () => { if (input.value.trim()) add(input.value); };
+  redraw();
+  wrap.append(label, box);
+  if (hint) { const h = document.createElement("div"); h.className = "hint"; h.textContent = hint; wrap.appendChild(h); }
+  wrap.getValues = () => list.slice();
+  wrap.addValue = (v) => { if (v && !list.includes(v)) { list.push(v); redraw(); markDirty(); } };
+  return wrap;
+}
+
+function autoGrow(ta) {
+  ta.style.height = "auto";
+  ta.style.height = Math.max(60, ta.scrollHeight + 2) + "px";
+}
+
+function markDirty() { state.dirty = true; }
+
+/* ------------------------------------------------------------------ editor */
+function blankDetail(kind) {
+  const fields = {};
+  (state.sections[kind] || []).forEach((s) => { fields[s] = ""; });
+  if (!(state.sections[kind] || []).length) fields._head = "";
+  return {key: "", kind: kind, title: "", keywords: [], aliases: [],
+          secondary: {all: [], any: [], not: []}, scan_depth: null, refs: [],
+          priority: 0, enabled: true, inject: true, fields: fields, mtime: null,
+          archived: false, isNew: true};
+}
+
+function renderEditor(detail) {
+  state.detail = detail;
+  state.dirty = false;
+  const host = $("editorBody");
+  host.textContent = "";
+  const form = document.createElement("div");
+
+  // kind + name
+  const top = document.createElement("div");
+  top.className = "row";
+  const kindField = document.createElement("div");
+  kindField.className = "field";
+  const kindLabel = document.createElement("label");
+  kindLabel.textContent = T.kind;
+  const kindSelect = document.createElement("select");
+  state.kinds.forEach((k) => {
+    const o = document.createElement("option");
+    o.value = k.kind; o.textContent = KIND_LABEL[k.kind] || k.kind;
+    if (k.kind === detail.kind) o.selected = true;
+    kindSelect.appendChild(o);
+  });
+  kindSelect.disabled = !detail.isNew;
+  kindSelect.onchange = () => {
+    const draft = collect(false);
+    const next = blankDetail(kindSelect.value);
+    next.key = draft.key; next.title = draft.title;
+    next.keywords = draft.keywords; next.aliases = draft.aliases;
+    renderEditor(next);
+  };
+  kindField.append(kindLabel, kindSelect);
+
+  const nameField = document.createElement("div");
+  nameField.className = "field";
+  const nameLabel = document.createElement("label");
+  nameLabel.textContent = T.name;
+  const nameInput = document.createElement("input");
+  nameInput.type = "text"; nameInput.value = detail.key; nameInput.id = "f_key";
+  nameInput.disabled = !detail.isNew;
+  nameInput.oninput = markDirty;
+  nameField.append(nameLabel, nameInput);
+
+  const titleField = document.createElement("div");
+  titleField.className = "field";
+  const titleLabel = document.createElement("label");
+  titleLabel.textContent = T.title;
+  const titleInput = document.createElement("input");
+  titleInput.type = "text"; titleInput.value = detail.title || ""; titleInput.id = "f_title";
+  titleInput.oninput = markDirty;
+  titleField.append(titleLabel, titleInput);
+  top.append(kindField, nameField, titleField);
+  form.appendChild(top);
+
+  // keywords / aliases
+  const kwField = chipsField(T.keywords, detail.keywords || [], T.keywordsHint);
+  const alField = chipsField(T.aliases, detail.aliases || [], T.aliasesHint);
+  form.append(kwField, alField);
+
+  // sections
+  const secs = state.sections[detail.kind] || [];
+  const textareas = {};
+  const names = secs.length ? secs : ["_head"];
+  for (const name of names) {
+    const f = document.createElement("div");
+    f.className = "field";
+    const l = document.createElement("label");
+    l.textContent = name === "_head" ? T.body : name;
+    const ta = document.createElement("textarea");
+    ta.value = (detail.fields && detail.fields[name]) || "";
+    ta.oninput = () => { autoGrow(ta); markDirty(); };
+    f.append(l, ta);
+    if ((state.private[detail.kind] || []).includes(name)) {
+      const h = document.createElement("div");
+      h.className = "hint"; h.textContent = T.notInjected;
+      f.appendChild(h);
+    }
+    form.appendChild(f);
+    textareas[name] = ta;
+    setTimeout(() => autoGrow(ta), 0);
+  }
+
+  // secondary
+  const secWrap = document.createElement("div");
+  secWrap.className = "field";
+  const secLabel = document.createElement("label");
+  secLabel.textContent = T.secondary;
+  const secRow = document.createElement("div");
+  secRow.className = "row";
+  const sec = detail.secondary || {all: [], any: [], not: []};
+  const secAll = chipsField(T.secAll, sec.all || []);
+  const secAny = chipsField(T.secAny, sec.any || []);
+  const secNot = chipsField(T.secNot, sec.not || []);
+  secRow.append(secAll, secAny, secNot);
+  secWrap.append(secLabel, secRow);
+  form.appendChild(secWrap);
+
+  // refs (people cards)
+  const refWrap = document.createElement("div");
+  refWrap.className = "field";
+  const refLabel = document.createElement("label");
+  refLabel.textContent = T.refs;
+  const refBox = document.createElement("div");
+  refBox.className = "refs";
+  const refKeys = new Set(detail.refs || []);
+  const refCandidates = state.cards.filter((c) => c.kind === "people" && c.key !== detail.key);
+  refCandidates.forEach((c) => {
+    const l = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.value = c.key; cb.checked = refKeys.has(c.key);
+    cb.onchange = markDirty;
+    l.append(cb, document.createTextNode(c.title || c.key));
+    refBox.appendChild(l);
+  });
+  (detail.refs || []).forEach((r) => {
+    if (!refCandidates.some((c) => c.key === r)) {
+      const l = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox"; cb.value = r; cb.checked = true; cb.onchange = markDirty;
+      l.append(cb, document.createTextNode(r));
+      refBox.appendChild(l);
+    }
+  });
+  refWrap.append(refLabel, refBox);
+  if (refCandidates.length || (detail.refs || []).length) {
+    const h = document.createElement("div"); h.className = "hint"; h.textContent = T.refsHint;
+    refWrap.appendChild(h);
+    form.appendChild(refWrap);
+  }
+
+  // priority + enabled
+  const flags = document.createElement("div");
+  flags.className = "row";
+  const prioField = document.createElement("div");
+  prioField.className = "field";
+  const prioLabel = document.createElement("label");
+  prioLabel.textContent = T.priority;
+  const prio = document.createElement("input");
+  prio.type = "number"; prio.step = "1"; prio.value = detail.priority || 0; prio.oninput = markDirty;
+  prioField.append(prioLabel, prio);
+  const enField = document.createElement("div");
+  enField.className = "field check";
+  const enBox = document.createElement("input");
+  enBox.type = "checkbox"; enBox.checked = detail.enabled !== false; enBox.id = "f_enabled";
+  enBox.onchange = markDirty;
+  const enLabel = document.createElement("label");
+  enLabel.htmlFor = "f_enabled"; enLabel.textContent = T.enabled;
+  enField.append(enBox, enLabel);
+  flags.append(prioField, enField);
+  form.appendChild(flags);
+
+  // fine tuning
+  const det = document.createElement("details");
+  const sum = document.createElement("summary");
+  sum.textContent = T.finetune;
+  const depthField = document.createElement("div");
+  depthField.className = "field";
+  const depthLabel = document.createElement("label");
+  depthLabel.textContent = T.scanDepth;
+  const depth = document.createElement("input");
+  depth.type = "number"; depth.min = "0"; depth.max = "10";
+  depth.value = detail.scan_depth === null || detail.scan_depth === undefined ? "" : detail.scan_depth;
+  depth.oninput = markDirty;
+  depthField.append(depthLabel, depth);
+  const injField = document.createElement("div");
+  injField.className = "field check";
+  const injBox = document.createElement("input");
+  injBox.type = "checkbox"; injBox.checked = detail.inject !== false; injBox.id = "f_inject";
+  injBox.onchange = markDirty;
+  const injLabel = document.createElement("label");
+  injLabel.htmlFor = "f_inject"; injLabel.textContent = T.inject;
+  injField.append(injBox, injLabel);
+  det.append(sum, depthField, injField);
+  form.appendChild(det);
+
+  // actions
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const save = document.createElement("button");
+  save.className = "primary"; save.textContent = T.save;
+  const msg = document.createElement("span");
+  msg.className = "msg";
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  actions.append(save, msg, spacer);
+  if (!detail.isNew) {
+    const del = document.createElement("button");
+    del.className = "ghost";
+    del.textContent = detail.archived ? T.restore : T.del;
+    del.onclick = () => (detail.archived ? doRestore(detail) : doArchive(detail));
+    actions.appendChild(del);
+  }
+  form.appendChild(actions);
+  const conflictHost = document.createElement("div");
+  form.appendChild(conflictHost);
+
+  function collect(strict) {
+    const fields = {};
+    Object.keys(textareas).forEach((n) => { fields[n] = textareas[n].value; });
+    const refs = Array.prototype.slice.call(refBox.querySelectorAll("input:checked")).map((c) => c.value);
+    return {
+      key: nameInput.value.trim(), kind: kindSelect.value, title: titleInput.value.trim(),
+      keywords: kwField.getValues(), aliases: alField.getValues(),
+      secondary: {all: secAll.getValues(), any: secAny.getValues(), not: secNot.getValues()},
+      refs: refs, priority: Number(prio.value) || 0, enabled: enBox.checked,
+      inject: injBox.checked, scan_depth: depth.value === "" ? null : Number(depth.value),
+      fields: fields, mtime: detail.mtime, extra_fm: detail.extra_fm || null,
+      head: detail.head || "", extra: detail.extra || ""
+    };
+  }
+
+  save.onclick = async () => {
+    const payload = collect(true);
+    if (!payload.key) { msg.textContent = T.nameRequired; msg.className = "msg err"; return; }
+    msg.textContent = T.saving; msg.className = "msg";
+    conflictHost.textContent = "";
+    try {
+      const saved = detail.isNew
+        ? await api("/api/cards", {method: "POST", body: payload})
+        : await api("/api/cards/" + encodeURIComponent(detail.kind) + "/" + encodeURIComponent(detail.key),
+                    {method: "PUT", body: payload});
+      msg.textContent = T.saved;
+      state.dirty = false;
+      await refresh();
+      openCard(saved.kind, saved.key, false);
+    } catch (err) {
+      if (err.status === 409 && err.data && err.data.current) {
+        msg.textContent = ""; showConflict(conflictHost, payload, err.data.current, detail);
+      } else {
+        msg.textContent = (T.failed + ": " + err.message); msg.className = "msg err";
+      }
+    }
+  };
+
+  host.appendChild(form);
+  if (window.innerWidth <= 480) setPane("editor");
+}
+
+function summarise(card) {
+  const lines = [];
+  lines.push(T.title + ": " + (card.title || card.key));
+  lines.push(T.keywords + ": " + (card.keywords || []).join(", "));
+  const fields = card.fields || {};
+  Object.keys(fields).forEach((k) => { if (fields[k]) lines.push("## " + k + "\n" + fields[k]); });
+  return lines.join("\n");
+}
+
+function showConflict(host, mine, theirs, detail) {
+  host.textContent = "";
+  const box = document.createElement("div");
+  box.className = "conflict";
+  const h = document.createElement("h3");
+  h.textContent = T.conflict;
+  const cols = document.createElement("div");
+  cols.className = "cols";
+  [[T.mine, summarise(mine)], [T.theirs, summarise(theirs)]].forEach(([label, text]) => {
+    const col = document.createElement("div");
+    const l = document.createElement("strong"); l.textContent = label;
+    const pre = document.createElement("pre"); pre.textContent = text;
+    col.append(l, pre);
+    cols.appendChild(col);
+  });
+  const keep = document.createElement("button");
+  keep.textContent = T.keepMine;
+  keep.onclick = async () => {
+    const payload = Object.assign({}, mine, {mtime: theirs.mtime});
+    try {
+      const saved = await api("/api/cards/" + encodeURIComponent(detail.kind) + "/" +
+                              encodeURIComponent(detail.key), {method: "PUT", body: payload});
+      await refresh(); openCard(saved.kind, saved.key, false);
+    } catch (e) { h.textContent = T.failed + ": " + e.message; }
+  };
+  const take = document.createElement("button");
+  take.textContent = T.takeTheirs;
+  take.onclick = () => renderEditor(Object.assign({}, theirs, {isNew: false}));
+  const row = document.createElement("div");
+  row.className = "actions";
+  row.append(keep, take);
+  box.append(h, cols, row);
+  host.appendChild(box);
+}
+
+async function openCard(kind, key, archived) {
+  state.selected = kind + "/" + key;
+  renderList();
+  const q = archived ? "?archived=1" : "";
+  try {
+    const detail = await api("/api/cards/" + encodeURIComponent(kind) + "/" +
+                             encodeURIComponent(key) + q);
+    detail.isNew = false;
+    renderEditor(detail);
+  } catch (err) {
+    $("editorBody").textContent = T.failed + ": " + err.message;
+  }
+}
+
+async function doArchive(detail) {
+  if (!confirm(T.confirmDelete)) return;
+  await api("/api/cards/" + encodeURIComponent(detail.kind) + "/" + encodeURIComponent(detail.key),
+            {method: "DELETE"});
+  state.selected = null;
+  await refresh();
+  $("editorBody").textContent = T.deleted;
+}
+
+async function doRestore(detail) {
+  try {
+    await api("/api/cards/" + encodeURIComponent(detail.kind) + "/" +
+              encodeURIComponent(detail.key) + "/restore", {method: "POST"});
+    await refresh();
+    openCard(detail.kind, detail.key, false);
+  } catch (err) { $("editorBody").textContent = T.failed + ": " + err.message; }
+}
+
+/* ------------------------------------------------------------------ try / panels */
+async function runTry() {
+  const text = $("tryInput").value.trim();
+  if (!text) { $("tryBox").hidden = true; return; }
+  const out = $("tryResult");
+  out.textContent = "";
+  $("tryBox").hidden = false;
+  let data;
+  try { data = await api("/api/try", {method: "POST", body: {text: text}}); }
+  catch (err) { out.textContent = T.failed + ": " + err.message; return; }
+  if (!data.matched.length) {
+    const p = document.createElement("p");
+    p.className = "empty"; p.textContent = T.nothing;
+    out.appendChild(p);
+  }
+  data.matched.forEach((m) => {
+    const row = document.createElement("div");
+    row.className = "hit";
+    const a = document.createElement("button");
+    a.className = "ghost t"; a.textContent = m.title || m.key;
+    a.onclick = () => openCard(m.kind, m.key, false);
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = m.hits.join(", ") + " · " + T.score + " " + m.score +
+                       (m.in_budget ? "" : " · " + T.overBudget);
+    if (!m.in_budget) meta.classList.add("out");
+    row.append(a, meta);
+    out.appendChild(row);
+  });
+  const cand = [].concat(data.candidates.names || [], data.candidates.places || []);
+  if (cand.length) {
+    const row = document.createElement("div");
+    row.className = "hit";
+    const label = document.createElement("span");
+    label.className = "meta"; label.textContent = T.candidates;
+    row.appendChild(label);
+    cand.slice(0, 10).forEach((w) => {
+      const b = document.createElement("button");
+      b.className = "pill"; b.textContent = w; b.title = T.addKeyword;
+      b.onclick = () => {
+        const box = document.querySelector("#editorBody .chips");
+        const field = box && box.parentElement;
+        if (field && field.addValue) field.addValue(w);
+      };
+      row.appendChild(b);
+    });
+    out.appendChild(row);
+  }
+}
+
+async function loadRecent() {
+  const data = await api("/api/recent?limit=30").catch(() => ({recent: []}));
+  const ul = $("recentList");
+  ul.textContent = "";
+  if (!data.recent.length) {
+    const li = document.createElement("li"); li.className = "empty";
+    li.textContent = T.noRecent; ul.appendChild(li); return;
+  }
+  data.recent.forEach((r) => {
+    const li = document.createElement("li");
+    const when = document.createElement("span");
+    when.className = "when";
+    when.textContent = new Date(r.ts * 1000).toLocaleString();
+    const what = document.createElement("span");
+    what.textContent = (r.keys || []).join(", ") + " — " + (r.source || "");
+    li.append(when, what);
+    ul.appendChild(li);
+  });
+}
+
+async function loadCheckup() {
+  const data = await api("/api/checkup").catch(() => ({issues: []}));
+  const ul = $("checkList");
+  ul.textContent = "";
+  if (!data.issues.length) {
+    const li = document.createElement("li"); li.className = "empty";
+    li.textContent = T.noIssues; ul.appendChild(li); return;
+  }
+  data.issues.forEach((i) => {
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.className = "ghost";
+    b.textContent = i.path;
+    b.onclick = () => {
+      const row = state.cards.find((c) => c.path === i.path);
+      if (row) openCard(row.kind, row.key, false);
+    };
+    const d = document.createElement("span");
+    d.className = "issue";
+    d.textContent = i.code + ": " + i.detail;
+    li.append(b, d);
+    ul.appendChild(li);
+  });
+}
+
+/* ------------------------------------------------------------------ boot */
+function setPane(pane) {
+  document.body.dataset.pane = pane;
+  $("paneList").className = pane === "list" ? "primary" : "";
+  $("paneEditor").className = pane === "editor" ? "primary" : "";
+}
+
+async function refresh() {
+  const [cards, archived] = await Promise.all([
+    api("/api/cards"), api("/api/cards?archived=1").catch(() => ({cards: []}))]);
+  state.cards = cards.cards;
+  state.archived = archived.cards;
+  $("vaultPath").textContent = cards.vault;
+  renderNav();
+  renderList();
+  loadRecent();
+  loadCheckup();
+}
+
+async function boot() {
+  applyStrings();
+  try {
+    const kinds = await api("/api/kinds");
+    state.kinds = kinds.kinds;
+    kinds.kinds.forEach((k) => {
+      state.sections[k.kind] = k.sections.concat(k.private_sections || []);
+      state.private[k.kind] = k.private_sections || [];
+    });
+  } catch (err) {
+    document.body.innerHTML = "";
+    const p = document.createElement("p");
+    p.style.padding = "24px";
+    p.textContent = (err.status === 401 ? T.token + " — " : "") + T.failed + ": " + err.message;
+    document.body.appendChild(p);
+    return;
+  }
+  await refresh();
+  $("newBtn").onclick = () => { state.selected = null; renderList();
+                                renderEditor(blankDetail(state.filter === "all" ||
+                                             state.filter === "archived" ? "people" : state.filter)); };
+  $("tryBtn").onclick = runTry;
+  $("tryInput").onkeydown = (e) => { if (e.key === "Enter") runTry(); };
+  $("exportBtn").onclick = () => {
+    const url = "/api/export" + (token() ? "?token=" + encodeURIComponent(token()) : "");
+    location.href = url;
+  };
+  $("importBtn").onclick = () => $("importFile").click();
+  $("importFile").onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const book = JSON.parse(await file.text());
+      const res = await api("/api/import", {method: "POST", body: {book: book, kind: "entry"}});
+      alert(T.importDone + ": " + res.written.length + " · " + T.kept + ": " + res.skipped.length);
+      await refresh();
+    } catch (err) { alert(T.failed + ": " + err.message); }
+    e.target.value = "";
+  };
+  document.querySelectorAll(".mobiletabs button").forEach((b) => {
+    b.onclick = () => setPane(b.dataset.pane);
+  });
+  window.addEventListener("beforeunload", (e) => {
+    if (state.dirty) { e.preventDefault(); e.returnValue = ""; }
+  });
+  if ("serviceWorker" in navigator && location.protocol !== "file:") {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  }
+}
+boot();
+</script>
+</body>
+</html>

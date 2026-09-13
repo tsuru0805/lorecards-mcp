@@ -1,4 +1,4 @@
-"""MCP server: five tools over one card vault.
+"""MCP server: the writing end of a card vault.
 
 Run it over stdio (the default) or streamable HTTP::
 
@@ -23,15 +23,15 @@ except ImportError:  # pragma: no cover - exercised by whichever SDK is installe
     MCP_V2 = False
 
 from . import engine, schema as sc
-from .cli import DEFAULT_VAULT, ENV_VAULT, HOOK_HEADER, resolve_vault
+from .cli import DEFAULT_VAULT, ENV_VAULT, resolve_vault
 
 INSTRUCTIONS = """\
 This vault is a card book: short Markdown cards about the people, events, places, things
-and in-jokes the user has mentioned before. Call recall_cards near the start of a reply
-whenever the user names someone or something that might already have a card — it is cheap
-and returns nothing when no card matches. Use write_card when the user tells you something
-about a subject that is worth keeping: mode="create" for a new card, mode="update_recent"
-to refresh only the "recent" section of an existing one."""
+and in-jokes the user has mentioned before. Cards are surfaced automatically by the
+lorecards gateway or hook, so there is nothing to look up — these tools are for writing.
+When the user tells you something worth keeping about a subject, use write_card:
+mode="create" for a new card, mode="update_recent" to refresh only the "recent" section of
+one that exists. read_card and list_cards are there for checking what is already written."""
 
 
 def build_server(vault: str | Path, *, budget_chars: int = engine.DEFAULT_BUDGET_CHARS,
@@ -45,31 +45,6 @@ def build_server(vault: str | Path, *, budget_chars: int = engine.DEFAULT_BUDGET
 
     def _schema() -> sc.CardSchema:
         return sc.load_schema(vault_path)
-
-    @mcp.tool()
-    def recall_cards(text: str, recent_turns: list[dict[str, str]] | None = None) -> dict[str, Any]:
-        """Return the cards that the current message (plus recent turns) triggers.
-
-        text: what the user just said. recent_turns: the last few messages, oldest first,
-        as [{"role": "user"|"assistant", "text": "..."}] — pass raw conversation text only.
-        Returns a ready-to-read `context` block plus the matched cards.
-        """
-        result = engine.consult(text, vault_path, turns=recent_turns or [],
-                                budget_chars=budget_chars, scan_depth=scan_depth,
-                                schema=_schema())
-        return {"context": engine.render_context(result, HOOK_HEADER),
-                "cards": [c.as_dict() for c in result["hits"]],
-                "truncated": result["truncated"], "chars": result["injected"]}
-
-    @mcp.tool()
-    def try_text(text: str, recent_turns: list[dict[str, str]] | None = None) -> dict[str, Any]:
-        """Dry run: which cards would fire, why, and which words look like they deserve a card."""
-        result = engine.consult(text, vault_path, turns=recent_turns or [],
-                                budget_chars=budget_chars, scan_depth=scan_depth,
-                                dry_run=True, schema=_schema())
-        debug = result.get("debug", {})
-        return {"matched": debug.get("cards", []), "candidates": debug.get("candidates", {}),
-                "jieba": debug.get("jieba", False), "truncated": result["truncated"]}
 
     @mcp.tool()
     def list_cards(kind: str | None = None) -> dict[str, Any]:

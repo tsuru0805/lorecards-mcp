@@ -15,9 +15,11 @@ list (the remainder is reported as ``truncated``).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,12 @@ DEFAULT_SCAN_DEPTH = sc.DEFAULT_SCAN_DEPTH
 _MIN_SUBSTRING_LEN = 2
 _LATIN_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-]*")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[一-鿿぀-ヿ]+")
+
+#: Directories inside the vault that are not cards: the archive and internal state.
+ARCHIVE_DIRNAME = "_archive"
+STATE_DIRNAME = ".lorecards"
+HITS_FILENAME = "hits.jsonl"
+HITS_MAX_LINES = 2000
 
 _lock = threading.RLock()
 _cache: dict[str, dict] = {}
@@ -132,7 +140,8 @@ def _parse_card(md_path: Path, vault_root: Path, schema: sc.CardSchema) -> Card 
     meta = sc.parse_meta(fm, rel, md_path.stem, schema)
     if not meta["keywords"] or not meta["enabled"]:
         return None
-    body = body.strip()
+    # private sections stay in the file and stay readable; they never reach a model
+    body = sc.strip_private(body, schema).strip()
     if not body:
         return None
 
@@ -142,11 +151,20 @@ def _parse_card(md_path: Path, vault_root: Path, schema: sc.CardSchema) -> Card 
                 scan_depth=meta["scan_depth"], refs=meta["refs"], inject=meta["inject"])
 
 
+def iter_card_files(root: Path):
+    """Every card file in the vault, skipping the archive and any dot/underscore directory."""
+    for p in sorted(root.rglob("*.md")):
+        rel = p.relative_to(root)
+        if any(part.startswith((".", "_")) for part in rel.parts[:-1]):
+            continue
+        yield p
+
+
 def _fingerprint(root: Path) -> tuple:
     """``(path, mtime_ns, size)`` per file. Editing a card changes its own mtime but not
     necessarily the directory's, so the fingerprint has to be per file."""
     items = []
-    for p in sorted(root.rglob("*.md")):
+    for p in iter_card_files(root):
         try:
             st = p.stat()
         except OSError:
@@ -169,7 +187,7 @@ def load_cards(vault_root: str | Path, schema: sc.CardSchema | None = None,
         if cached and cached["fp"] == fp:
             cards = cached["cards"]
             return cards if include_non_injecting else [c for c in cards if c.inject]
-    cards = [c for p in sorted(root.rglob("*.md"))
+    cards = [c for p in iter_card_files(root)
              if (c := _parse_card(p, root, schema)) is not None]
     with _lock:
         _cache[key] = {"fp": fp, "cards": cards}
@@ -387,7 +405,18 @@ def render_context(result: dict, header: str = "Cards in play (from the user's c
 
 
 class CardError(Exception):
-    """A card operation could not be carried out (bad key, missing card, write conflict)."""
+    """A card operation could not be carried out (bad key, missing card, bad kind)."""
+
+
+class ConflictError(CardError):
+    """The card changed underneath this write, or the name is already taken.
+
+    ``current`` carries the version now on disk so a caller can show both side by side.
+    """
+
+    def __init__(self, message: str, current: dict | None = None):
+        super().__init__(message)
+        self.current = current
 
 
 def card_path(vault_root: str | Path, kind: str, key: str,
@@ -414,7 +443,7 @@ def find_card(vault_root: str | Path, key: str,
         p = root / schema.rel_for(kind, safe)
         if p.is_file():
             return p
-    hits = sorted(root.rglob(f"{safe}.md"))
+    hits = [p for p in iter_card_files(root) if p.stem == safe]
     return hits[0] if hits else None
 
 
@@ -519,7 +548,7 @@ def check_vault(vault_root: str | Path, schema: sc.CardSchema | None = None) -> 
     root = Path(vault_root).expanduser()
     schema = schema or sc.load_schema(root)
     out: list[dict] = []
-    for p in sorted(root.rglob("*.md")):
+    for p in iter_card_files(root):
         rel = str(p.relative_to(root))
         try:
             raw = p.read_text(encoding="utf-8")
@@ -529,4 +558,229 @@ def check_vault(vault_root: str | Path, schema: sc.CardSchema | None = None) -> 
         fm, body, problem = sc.split_frontmatter(raw)
         for issue in sc.checkup(rel, fm, body, problem, schema):
             out.append({"path": rel, **issue})
+    return out
+
+
+# --------------------------------------------------------------------------- editor support
+
+
+def _detail_from_text(raw: str, rel: str, stem: str, path: Path,
+                      schema: sc.CardSchema) -> dict[str, Any]:
+    fm, body, problem = sc.split_frontmatter(raw)
+    fm = fm or {}
+    meta = sc.parse_meta(fm, rel, stem, schema)
+    kind = meta["kind"]
+    sections = sc.split_sections(body, kind, schema)
+    fields = {n: sections.get(n, "") for n in schema.all_sections_for(kind)}
+    if not schema.sections_for(kind):
+        fields = {"_head": sections.get("_head", "")}
+    known = set(sc.MANAGED_FM)
+    try:
+        # as a string: st_mtime_ns overflows a JavaScript number, and a mangled value
+        # would make every optimistic-locking check fail
+        mtime = str(path.stat().st_mtime_ns)
+    except OSError:
+        mtime = "0"
+    return {"key": stem, "kind": kind, "title": meta["title"], "path": rel,
+            "keywords": meta["keywords"], "aliases": meta["aliases"],
+            "secondary": meta["secondary"], "scan_depth": meta["scan_depth"],
+            "refs": meta["refs"], "priority": meta["priority"], "enabled": meta["enabled"],
+            "inject": meta["inject"], "fields": fields,
+            "head": sections.get("_head", "") if schema.sections_for(kind) else "",
+            "extra": sections.get("_extra", ""),
+            "extra_fm": {k: v for k, v in fm.items() if k not in known},
+            "problem": problem, "mtime": mtime, "text": raw}
+
+
+def card_detail(vault_root: str | Path, kind: str, key: str,
+                schema: sc.CardSchema | None = None, archived: bool = False) -> dict[str, Any]:
+    """Everything an editor needs about one card: frontmatter, sections, mtime."""
+    root = Path(vault_root).expanduser()
+    schema = schema or sc.load_schema(root)
+    path = archive_path(root, kind, key, schema) if archived else card_path(root, kind, key, schema)
+    if not path.is_file():
+        raise CardError(f"no such card: {kind}/{key}")
+    rel = str(path.relative_to(root))
+    detail = _detail_from_text(path.read_text(encoding="utf-8"), schema.rel_for(kind, path.stem),
+                               path.stem, path, schema)
+    detail["path"] = rel
+    detail["archived"] = archived
+    return detail
+
+
+def upsert_card(vault_root: str | Path, kind: str, key: str, data: dict[str, Any], *,
+                create: bool = False, expected_mtime: int | str | None = None,
+                schema: sc.CardSchema | None = None) -> dict[str, Any]:
+    """Write a whole card from an editor payload.
+
+    ``create=True`` refuses to overwrite. Otherwise, when ``expected_mtime`` is given and the
+    file has changed since, the write is refused and the caller gets the current version back
+    (optimistic locking, so two editors cannot silently clobber each other).
+    """
+    root = Path(vault_root).expanduser()
+    schema = schema or sc.load_schema(root)
+    path = card_path(root, kind, key, schema)
+    if create and path.exists():
+        raise ConflictError(f"card already exists: {schema.rel_for(kind, key)}",
+                            current=card_detail(root, kind, key, schema))
+    if not create:
+        if not path.is_file():
+            raise CardError(f"no such card: {kind}/{key}")
+        if expected_mtime is not None and str(path.stat().st_mtime_ns) != str(expected_mtime):
+            raise ConflictError("this card changed on disk while you were editing it",
+                                current=card_detail(root, kind, key, schema))
+
+    fields = dict(data.get("fields") or {})
+    if data.get("head"):
+        fields["_head"] = data["head"]
+    if data.get("extra"):
+        fields["_extra"] = data["extra"]
+    text = sc.render_card(kind=kind, key=path.stem, fields=fields,
+                          keywords=data.get("keywords") or [], title=data.get("title"),
+                          aliases=data.get("aliases"), secondary=data.get("secondary"),
+                          refs=data.get("refs"), scan_depth=sc.parse_scan_depth(data.get("scan_depth")),
+                          priority=data.get("priority") or 0,
+                          enabled=data.get("enabled", True) is not False,
+                          inject=data.get("inject", True) is not False,
+                          extra_fm=data.get("extra_fm"), schema=schema)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    invalidate_cache()
+    return card_detail(root, kind, key, schema)
+
+
+def archive_path(vault_root: str | Path, kind: str, key: str,
+                 schema: sc.CardSchema | None = None) -> Path:
+    root = Path(vault_root).expanduser()
+    schema = schema or sc.load_schema(root)
+    safe = sc.safe_key(key)
+    if safe is None:
+        raise CardError(f"unsafe card key: {key!r}")
+    if kind not in sc.KINDS:
+        raise CardError(f"unknown kind: {kind!r}")
+    return root / ARCHIVE_DIRNAME / kind / f"{safe}.md"
+
+
+def archive_card(vault_root: str | Path, kind: str, key: str,
+                 schema: sc.CardSchema | None = None) -> dict[str, Any]:
+    """"Delete" a card by moving it into ``_archive/`` — nothing is ever removed from disk."""
+    root = Path(vault_root).expanduser()
+    schema = schema or sc.load_schema(root)
+    src = card_path(root, kind, key, schema)
+    if not src.is_file():
+        raise CardError(f"no such card: {kind}/{key}")
+    dest = archive_path(root, kind, key, schema)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        dest.unlink()
+    src.replace(dest)
+    invalidate_cache()
+    return {"ok": True, "archived": str(dest.relative_to(root)), "kind": kind, "key": src.stem}
+
+
+def restore_card(vault_root: str | Path, kind: str, key: str,
+                 schema: sc.CardSchema | None = None) -> dict[str, Any]:
+    """Move an archived card back where it came from."""
+    root = Path(vault_root).expanduser()
+    schema = schema or sc.load_schema(root)
+    src = archive_path(root, kind, key, schema)
+    if not src.is_file():
+        raise CardError(f"no archived card: {kind}/{key}")
+    dest = card_path(root, kind, key, schema)
+    if dest.exists():
+        raise ConflictError(f"a card named {dest.stem!r} is back in {kind}; rename one of them",
+                            current=card_detail(root, kind, key, schema))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    src.replace(dest)
+    invalidate_cache()
+    return {"ok": True, "restored": str(dest.relative_to(root)), "kind": kind, "key": dest.stem}
+
+
+def list_archived(vault_root: str | Path, schema: sc.CardSchema | None = None) -> list[dict]:
+    """The archive, as list rows shaped like :func:`list_cards`."""
+    root = Path(vault_root).expanduser()
+    schema = schema or sc.load_schema(root)
+    base = root / ARCHIVE_DIRNAME
+    if not base.is_dir():
+        return []
+    out = []
+    for p in sorted(base.rglob("*.md")):
+        kind = p.parent.name if p.parent != base else "entry"
+        try:
+            raw = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        fm, body, _ = sc.split_frontmatter(raw)
+        meta = sc.parse_meta(fm or {}, schema.rel_for(kind, p.stem), p.stem, schema)
+        out.append({"key": p.stem, "kind": kind if kind in sc.KINDS else "entry",
+                    "title": meta["title"], "path": str(p.relative_to(root)),
+                    "keywords": meta["keywords"], "aliases": meta["aliases"],
+                    "enabled": meta["enabled"], "inject": meta["inject"],
+                    "preview": " ".join(body.split())[:120], "archived": True,
+                    "mtime": str(p.stat().st_mtime_ns)})
+    return out
+
+
+# --------------------------------------------------------------------------- hit ledger
+
+
+def hits_path(vault_root: str | Path) -> Path:
+    return Path(vault_root).expanduser() / STATE_DIRNAME / HITS_FILENAME
+
+
+def log_hits(vault_root: str | Path, source: str, cards: list, terms: list[str] | None = None,
+             text: str = "") -> None:
+    """Append one line to the vault's hit ledger. The engine itself never calls this:
+    the MCP server, the hook and the web UI decide what is worth recording."""
+    keys = [c.key if isinstance(c, Card) else str(c) for c in cards]
+    if not keys:
+        return
+    if terms is None:
+        terms = sorted({t for c in cards if isinstance(c, Card) for t in c.hit_terms})
+    entry = {"ts": time.time(), "source": source, "keys": keys, "hits": list(terms),
+             "text": (text or "")[:200]}
+    path = hits_path(vault_root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _lock:
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            _roll_hits(path)
+    except OSError as e:  # a ledger is a nicety; never let it break a lookup
+        log.warning("could not write the hit ledger: %r", e)
+
+
+def _roll_hits(path: Path) -> None:
+    """Keep the ledger bounded: trim to the newest HITS_MAX_LINES lines."""
+    try:
+        if path.stat().st_size < HITS_MAX_LINES * 120:
+            return
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if len(lines) <= HITS_MAX_LINES:
+            return
+        path.write_text("\n".join(lines[-HITS_MAX_LINES:]) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def read_hits(vault_root: str | Path, limit: int = 50) -> list[dict]:
+    """The most recent ledger entries, newest first."""
+    path = hits_path(vault_root)
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+        if len(out) >= max(1, limit):
+            break
     return out

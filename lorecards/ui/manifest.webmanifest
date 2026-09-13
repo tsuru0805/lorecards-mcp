@@ -1,0 +1,15 @@
+{
+  "name": "lorecards",
+  "short_name": "lorecards",
+  "description": "Edit the card book that surfaces when a conversation mentions it.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#16181c",
+  "theme_color": "#1b1e24",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

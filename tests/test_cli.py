@@ -173,3 +173,23 @@ def test_vault_is_accepted_on_either_side_of_the_subcommand(vault, capsys):
     code, before = run(["--vault", str(vault), "list"], capsys)
     code2, after = run(["list", "--vault", str(vault)], capsys)
     assert code == code2 == 0 and before == after and "Alice" in after
+
+
+def test_hook_dedupes_within_one_claude_code_session(vault, capsys, monkeypatch):
+    payload = {"user_prompt": "what is Alice up to", "session_id": "session-a"}
+    assert "Alice" in _hook(payload, vault, capsys, monkeypatch)[1]
+    # same session, next turn: the card is still in the context window upstream
+    assert _hook(payload, vault, capsys, monkeypatch)[1] == ""
+    # a different session starts fresh
+    other = dict(payload, session_id="session-b")
+    assert "Alice" in _hook(other, vault, capsys, monkeypatch)[1]
+    # and --reinject-after 0 turns dedupe off
+    assert "Alice" in _hook(payload, vault, capsys, monkeypatch,
+                            extra=["--reinject-after", "0"])[1]
+
+
+def test_hook_dedupe_expires(vault, capsys, monkeypatch):
+    payload = {"user_prompt": "what is Alice up to", "session_id": "session-c"}
+    assert "Alice" in _hook(payload, vault, capsys, monkeypatch, extra=["--reinject-after", "2"])[1]
+    assert _hook(payload, vault, capsys, monkeypatch, extra=["--reinject-after", "2"])[1] == ""
+    assert "Alice" in _hook(payload, vault, capsys, monkeypatch, extra=["--reinject-after", "2"])[1]
