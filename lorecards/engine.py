@@ -742,7 +742,10 @@ def log_hits(vault_root: str | Path, source: str, cards: list, terms: list[str] 
     path = hits_path(vault_root)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with _lock:
+        # the same cross-process lock the injection ledger uses: appends from two
+        # gateways are fine, but the rolling rewrite must not race one
+        from .gateway import _FileLock  # noqa: PLC0415 - avoids an import cycle at load
+        with _FileLock(path):
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
             _roll_hits(path)

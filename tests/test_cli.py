@@ -193,3 +193,10 @@ def test_hook_dedupe_expires(vault, capsys, monkeypatch):
     assert "Alice" in _hook(payload, vault, capsys, monkeypatch, extra=["--reinject-after", "2"])[1]
     assert _hook(payload, vault, capsys, monkeypatch, extra=["--reinject-after", "2"])[1] == ""
     assert "Alice" in _hook(payload, vault, capsys, monkeypatch, extra=["--reinject-after", "2"])[1]
+
+
+def test_a_bad_token_or_upstream_is_a_clean_error_not_a_traceback(vault, capsys):
+    assert cli.main(["--vault", str(vault), "ui", "--token", "密码"]) == 2
+    assert "ASCII" in capsys.readouterr().err
+    assert cli.main(["--vault", str(vault), "gateway", "--upstream", "ftp://nope"]) == 2
+    assert "http(s)" in capsys.readouterr().err

@@ -223,6 +223,8 @@ class _FileLock:
             fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
         except OSError as e:
             log.warning("could not lock the injection ledger: %r", e)
+            if self.handle is not None:     # opened but not locked: do not leak the fd
+                self.handle.close()
             self.handle = None
         return self
 
@@ -259,10 +261,15 @@ def save_ledger(vault: str | Path, data: dict) -> None:
         # would otherwise interleave and leave torn JSON behind
         tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}."
                              f"{secrets.token_hex(4)}.tmp")
+    except OSError as e:
+        log.warning("could not write the injection ledger: %r", e)
+        return
+    try:
         tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)
     except OSError as e:
         log.warning("could not write the injection ledger: %r", e)
+        tmp.unlink(missing_ok=True)     # a unique name left behind is litter forever
 
 
 def _trim(data: dict) -> None:
@@ -401,6 +408,18 @@ def upstream_path(request: Request) -> str | None:
     return path
 
 
+def check_token(token: str | None) -> str | None:
+    """A token travels in an HTTP header, and a header may only carry ASCII."""
+    if token is None:
+        return None
+    try:
+        token.encode("ascii")
+    except UnicodeEncodeError:
+        raise ValueError("--token must be ASCII: it is sent as an HTTP header, and a "
+                         "non-ASCII one cannot be transmitted or compared") from None
+    return token
+
+
 def check_upstream(upstream: str) -> str:
     """Validate ``--upstream``: an http(s) origin, nothing else."""
     url = (upstream or "").strip().rstrip("/")
@@ -417,6 +436,7 @@ def build_gateway(vault: str | Path, upstream: str, *, inject: str = "user",
                   allowed_hosts: set[str] | None = ..., client: Any = None) -> Starlette:
     """Build the proxy app. ``client`` lets tests pass in an httpx client of their own."""
     base = check_upstream(upstream)
+    token = check_token(token)
     injector = Injector(vault, inject=inject, window=window, reinject_after=reinject_after,
                         budget_chars=budget_chars, framing=framing, log_hits=log_hits)
     if allowed_hosts is ...:
@@ -433,9 +453,16 @@ def build_gateway(vault: str | Path, upstream: str, *, inject: str = "user",
             return JSONResponse({"error": {"message": f"lorecards: unexpected Host header "
                                                       f"{host_header!r}",
                                            "type": "forbidden"}}, status_code=403)
+        # a real API client never sends Origin; a browser page always does
+        if request.headers.get("origin"):
+            return JSONResponse({"error": {"message": "lorecards: this is not a browser API",
+                                           "type": "forbidden"}}, status_code=403)
         if token:
             given = request.headers.get(TOKEN_HEADER, "")
-            if not hmac.compare_digest(given, token):
+            # compare bytes: compare_digest raises TypeError on a non-ASCII str, which
+            # would turn a wrong token into a 500
+            if not hmac.compare_digest(given.encode("utf-8", "surrogateescape"),
+                                       token.encode("utf-8")):
                 return JSONResponse({"error": {"message": f"lorecards: send {TOKEN_HEADER}: "
                                                           "<token>",
                                                "type": "unauthorized"}}, status_code=401)
@@ -522,6 +549,7 @@ def run_gateway(vault: str | Path, upstream: str, *, host: str = "127.0.0.1",
     import uvicorn  # noqa: PLC0415
 
     upstream = check_upstream(upstream)
+    token = check_token(token)
     if host not in LOOPBACK and not token:
         raise SystemExit(
             f"refusing to serve on {host} without --token: anyone who can reach that address "

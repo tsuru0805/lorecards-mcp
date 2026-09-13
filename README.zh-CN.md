@@ -50,15 +50,16 @@ $ curl -s http://127.0.0.1:8765/v1/chat/completions -D- \
     -d '{"model":"gpt-4o","messages":[{"role":"user","content":"how did the friday deploy go?"}]}'
 x-lorecards-injected: the Friday deploy
 …
-# 上游实际收到的最后一条 user 消息：
-# <!-- lorecards -->
+# 上游实际收到的最后一条 user 消息
+# （标记后缀是进程级随机串，每次启动都不一样）：
+# <!-- lorecards:9fef39 -->
 # A memory surfaces:
 #
 # ### the Friday deploy [event]
 # ## when
 # Every Friday afternoon, since the team moved to weekly releases.
 # …
-# <!-- /lorecards -->
+# <!-- /lorecards:9fef39 -->
 #
 # how did the friday deploy go?
 ```
@@ -281,9 +282,10 @@ private_sections: [通信脉络]
 | 文件 | 里面是什么 |
 | --- | --- |
 | `injections.json` | 每段会话：注入过哪些卡、在第几轮、最后一次见到是什么时候。**不含消息正文**。 |
-| `hits.jsonl` | 每次浮现一行：时间戳、来源（`gateway` / `hook` / `try`）、卡的 key、命中的词，以及**触发那句话的前 200 字**——「最近浮现」面板显示的就是它。 |
+| `hits.jsonl` | 每次浮现一行：时间戳、来源（`gateway` / `hook` / `try`）、卡的 key、命中的词，以及**触发那句话的前 200 字**。`GET /api/recent` 会把这些（含正文）都回传；网页「最近浮现」面板只显示时间、卡 key 和来源。 |
 
-`lorecards gateway --no-log` 和 `lorecards hook --no-log` 完全不写 `hits.jsonl`；
+`lorecards gateway`、`lorecards hook`、`lorecards ui` 的 `--no-log` 都会完全不写 `hits.jsonl`
+（`ui` 上它还会盖过 `/api/try?log=1`）；
 去重不受影响（它在另一个文件里）。这两个文件随时可以删。
 
 ## 导入 / 导出（SillyTavern 世界书）
@@ -356,7 +358,7 @@ lorecards export out.json       导出成 SillyTavern 世界书
 lorecards hook                  Claude Code 的 UserPromptSubmit hook
 
   gateway：--token、--no-log、--inject、--window、--reinject-after、--budget、--framing
-  ui：     --token、--host、--port
+  ui：     --token、--no-log、--host、--port
   hook：   --reinject-after、--no-log、--budget、--scan-depth
 ```
 
@@ -369,6 +371,7 @@ lorecards hook                  Claude Code 的 UserPromptSubmit hook
 - 去重按上面那套会话身份来。客户端如果每次请求都换 system prompt，又不带 `X-Lorecards-Conversation` 头，那每次都会被当成新会话。
 - **网页编辑器没有多用户、没有权限概念**：一个 vault、一个编辑者、没有操作记录；本机访问时完全没有鉴权。它是给「卡就是你自己的」那个人用的工具。
 - 一个进程一个 vault。多个角色或多套人设就开多个网关，或者在 MCP 配置里写多条，各自一个 `--vault`。
+- 注入标记里的随机串每次启动都会换，所以重启前写下的块不再被认作「我们的」，会留在它当时所在的历史里。那只是一段惰性文本，扫描时和用户自己打的字一视同仁。
 - 去重账本是每个 vault 一个 JSON 文件，持锁整体重写。一个人的对话量完全够用，但不是为几十个并发写者设计的。
 - 卡按文件的 mtime 和大小缓存，所以用编辑器改了卡，下次查询就生效——但一次改动如果两者都没变，是不会被察觉的。
 - `write_card(mode="update_recent")` 写之前会再核一次文件 mtime，文件在它读写之间变过就拒绝。这不是锁：两个 agent 在同一毫秒写同一张卡不在设计范围内。

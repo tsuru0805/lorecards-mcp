@@ -887,9 +887,20 @@ async function boot() {
                                              state.filter === "archived" ? "people" : state.filter)); };
   $("tryBtn").onclick = runTry;
   $("tryInput").onkeydown = (e) => { if (e.key === "Enter") runTry(); };
-  $("exportBtn").onclick = () => {
-    const url = "/api/export" + (token() ? "?token=" + encodeURIComponent(token()) : "");
-    location.href = url;
+  $("exportBtn").onclick = async () => {
+    // fetch with the token in a header, then save the blob: a token in the address bar
+    // ends up in history and in any Referer the page sends
+    try {
+      const headers = {"X-Lorecards": "1"};
+      if (token()) headers["Authorization"] = "Bearer " + token();
+      const res = await fetch("/api/export", {headers: headers});
+      if (!res.ok) throw new Error(res.status + "");
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement("a");
+      a.href = url; a.download = "lorecards.json";
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (err) { alert(T.failed + ": " + err.message); }
   };
   $("importBtn").onclick = () => $("importFile").click();
   $("importFile").onchange = async (e) => {

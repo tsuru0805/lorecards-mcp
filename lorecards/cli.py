@@ -230,16 +230,25 @@ def _recent_turns_from_transcript(path: str | None, depth: int) -> list[dict]:
 
 def cmd_ui(args: argparse.Namespace) -> int:
     """Serve the web editor. Blocks until interrupted."""
-    web.run_ui(resolve_vault(args.vault), host=args.host, port=args.port, token=args.token)
+    try:
+        web.run_ui(resolve_vault(args.vault), host=args.host, port=args.port, token=args.token,
+                   log_hits=not args.no_log)
+    except ValueError as e:          # a bad --token: say so, do not show a traceback
+        print(f"lorecards ui: {e}", file=sys.stderr)
+        return 2
     return 0
 
 
 def cmd_gateway(args: argparse.Namespace) -> int:
     """Run the injecting proxy. Blocks until interrupted."""
-    gateway.run_gateway(resolve_vault(args.vault), args.upstream, host=args.host, port=args.port,
-                        inject=args.inject, window=args.window,
-                        reinject_after=args.reinject_after, budget_chars=args.budget,
-                        framing=args.framing, token=args.token, log_hits=not args.no_log)
+    try:
+        gateway.run_gateway(resolve_vault(args.vault), args.upstream, host=args.host,
+                            port=args.port, inject=args.inject, window=args.window,
+                            reinject_after=args.reinject_after, budget_chars=args.budget,
+                            framing=args.framing, token=args.token, log_hits=not args.no_log)
+    except ValueError as e:          # a bad --token or --upstream
+        print(f"lorecards gateway: {e}", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -356,6 +365,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="interface to bind (default: %(default)s; anything else needs --token)")
     ui.add_argument("--port", type=int, default=web.DEFAULT_PORT)
     ui.add_argument("--token", help="require Authorization: Bearer <token> on /api/*")
+    ui.add_argument("--no-log", action="store_true",
+                    help="never record what surfaced in the vault's hit ledger, "
+                         "even when a try asks for it")
     ui.set_defaults(func=cmd_ui)
 
     gw = sub.add_parser("gateway", help="proxy an LLM API and inject cards into the prompt")

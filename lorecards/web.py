@@ -200,7 +200,10 @@ def security_guard(allowed_hosts: set[str] | None, token: str | None):
             header = request.headers.get("authorization", "")
             given = (header[7:] if header.lower().startswith("bearer ")
                      else request.query_params.get("token", ""))
-            if not hmac.compare_digest(given, token):
+            # bytes, not str: compare_digest raises TypeError on non-ASCII text, which
+            # would answer a wrong token with a 500
+            if not hmac.compare_digest(given.encode("utf-8", "surrogateescape"),
+                                       token.encode("utf-8")):
                 return deny("send Authorization: Bearer <token>", 401)
         return await call_next(request)
 
@@ -210,15 +213,32 @@ def security_guard(allowed_hosts: set[str] | None, token: str | None):
 # --------------------------------------------------------------------------- app
 
 
+_DEFAULT_HOSTS: Any = ...          # sentinel: "work it out from host and port"
+
+
+def check_token(token: str | None) -> str | None:
+    """A token travels in an HTTP header, and a header may only carry ASCII."""
+    if token is None:
+        return None
+    try:
+        token.encode("ascii")
+    except UnicodeEncodeError:
+        raise ValueError("--token must be ASCII: it is sent as an HTTP header, and a "
+                         "non-ASCII one cannot be transmitted or compared") from None
+    return token
+
+
 def build_app(vault: str | Path, token: str | None = None, *, host: str = "127.0.0.1",
-              port: int = DEFAULT_PORT, allowed_hosts: set[str] | None = ...) -> Starlette:
+              port: int = DEFAULT_PORT, allowed_hosts: set[str] | None | Any = _DEFAULT_HOSTS,
+              log_hits: bool = True) -> Starlette:
     """Build the Starlette app for one vault.
 
     ``allowed_hosts`` defaults to the loopback names plus the bind address; pass a set to
     override it, or ``None`` to accept any Host (only sensible behind a token).
     """
     vault_path = Path(vault).expanduser()
-    if allowed_hosts is ...:
+    token = check_token(token)
+    if allowed_hosts is _DEFAULT_HOSTS:
         allowed_hosts = (None if host in ("0.0.0.0", "::") and token
                          else allowed_hosts_for(host, port))
 
@@ -336,7 +356,7 @@ def build_app(vault: str | Path, token: str | None = None, *, host: str = "127.0
         matched = [{"key": c["key"], "kind": c["kind"], "title": c["title"], "hits": c["hits"],
                     "score": c["score"], "chars": c["chars"], "in_budget": c["in_budget"]}
                    for c in debug.get("cards", [])]
-        if request.query_params.get("log") in ("1", "true") and result["hits"]:
+        if log_hits and request.query_params.get("log") in ("1", "true") and result["hits"]:
             engine.log_hits(vault_path, "try", result["hits"], text=text)
         return JSONResponse({"matched": matched, "candidates": debug.get("candidates", {}),
                              "truncated": result["truncated"],
@@ -397,11 +417,12 @@ def build_app(vault: str | Path, token: str | None = None, *, host: str = "127.0
 
 
 def run_ui(vault: str | Path, host: str = "127.0.0.1", port: int = DEFAULT_PORT,
-           token: str | None = None) -> None:
+           token: str | None = None, log_hits: bool = True) -> None:
     """Serve the UI. Refuses to listen beyond localhost without a token."""
     import uvicorn  # noqa: PLC0415 - only needed when the UI is actually run
 
-    if host not in ("127.0.0.1", "localhost", "::1") and not token:
+    token = check_token(token)
+    if host not in LOOPBACK and not token:
         raise SystemExit(
             f"refusing to serve on {host} without --token: anyone who can reach that address "
             "could read and rewrite the vault. Pass --token <secret>, or keep the default host.")
@@ -413,5 +434,5 @@ def run_ui(vault: str | Path, host: str = "127.0.0.1", port: int = DEFAULT_PORT,
     print(f"              open: http://{shown}:{port}/{suffix}")
     if not token:
         print("              (no token: anyone who can reach this port can edit the vault)")
-    uvicorn.run(build_app(vault_path, token, host=host, port=port), host=host, port=port,
-                log_level="warning")
+    uvicorn.run(build_app(vault_path, token, host=host, port=port, log_hits=log_hits),
+                host=host, port=port, log_level="warning")

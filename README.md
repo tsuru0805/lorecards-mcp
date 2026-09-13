@@ -69,15 +69,16 @@ $ curl -s http://127.0.0.1:8765/v1/chat/completions -D- \
     -d '{"model":"gpt-4o","messages":[{"role":"user","content":"how did the friday deploy go?"}]}'
 x-lorecards-injected: the Friday deploy
 …
-# what the upstream received as the last user message:
-# <!-- lorecards -->
+# what the upstream received as the last user message
+# (the marker's suffix is a per-process nonce, so it differs on every run):
+# <!-- lorecards:9fef39 -->
 # A memory surfaces:
 #
 # ### the Friday deploy [event]
 # ## when
 # Every Friday afternoon, since the team moved to weekly releases.
 # …
-# <!-- /lorecards -->
+# <!-- /lorecards:9fef39 -->
 #
 # how did the friday deploy go?
 ```
@@ -350,9 +351,10 @@ Your API key and the model's replies are never stored or logged. Two files under
 | file | what is in it |
 | --- | --- |
 | `injections.json` | per conversation: which card keys were injected, at which turn, and when it was last seen. No message text. |
-| `hits.jsonl` | one line per surfacing: timestamp, source (`gateway` / `hook` / `try`), the card keys, the words that matched, and **the first 200 characters of the triggering message** — this is what the *recently surfaced* panel shows. |
+| `hits.jsonl` | one line per surfacing: timestamp, source (`gateway` / `hook` / `try`), the card keys, the words that matched, and **the first 200 characters of the triggering message**. `GET /api/recent` returns all of that, including the text; the *recently surfaced* panel in the UI displays only the time, the card keys and the source. |
 
-`lorecards gateway --no-log` and `lorecards hook --no-log` skip `hits.jsonl` entirely;
+`--no-log` on `lorecards gateway`, `lorecards hook` or `lorecards ui` skips `hits.jsonl`
+entirely (on `ui` it also overrides `/api/try?log=1`);
 dedupe still works, since that lives in the other file. Delete either file at any time.
 
 ## Import / export (SillyTavern lorebooks)
@@ -436,7 +438,7 @@ lorecards export out.json         SillyTavern lorebook out
 lorecards hook                    the Claude Code UserPromptSubmit hook
 
   gateway: --token, --no-log, --inject, --window, --reinject-after, --budget, --framing
-  ui:      --token, --host, --port
+  ui:      --token, --no-log, --host, --port
   hook:    --reinject-after, --no-log, --budget, --scan-depth
 ```
 
@@ -457,6 +459,9 @@ lorecards hook                    the Claude Code UserPromptSubmit hook
   no authentication at all. It is a tool for the person whose cards they are.
 - One vault per process. Several characters or profiles means several gateways or several
   entries in your MCP config, one `--vault` each.
+- The injection markers carry a nonce that is new on every start, so a block written before
+  a restart is no longer recognised as ours and stays in the history it was written into. It
+  is inert text; it is only scanned as if the user had typed it.
 - The dedupe ledger is a single JSON file per vault, rewritten whole under a lock. That is
   fine for one person's conversations; it is not built for dozens of concurrent writers.
 - Cards are cached on file mtime and size, so an edit takes effect on the next lookup — but a

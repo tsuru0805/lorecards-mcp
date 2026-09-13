@@ -358,3 +358,29 @@ def test_the_page_sends_the_guard_header_and_clears_the_token_from_the_url(clien
     page = client.get("/").text
     assert '"X-Lorecards"] = "1"' in page
     assert "history.replaceState" in page
+
+
+def test_a_non_ascii_token_is_refused_at_startup(vault):
+    with pytest.raises(ValueError, match="ASCII"):
+        web.check_token("密码")
+    with pytest.raises(ValueError, match="ASCII"):
+        web.build_app(vault, token="密码")
+
+
+def test_a_non_ascii_token_in_a_request_is_401_not_500(vault):
+    with ui_client(vault, token="s3cret") as c:
+        # bytes: an httpx str header must be ASCII, but a raw client can send this
+        res = c.get("/api/cards", headers={b"Authorization": "Bearer café".encode("utf-8")})
+        assert res.status_code == 401
+
+
+def test_ui_no_log_overrides_an_opt_in_try(vault):
+    app = web.build_app(vault, allowed_hosts={"testserver"}, log_hits=False)
+    with TestClient(app, headers={web.GUARD_HEADER: "1"}) as c:
+        assert c.post("/api/try?log=1", json={"text": "Alice"}).status_code == 200
+        assert c.get("/api/recent").json()["recent"] == []
+
+
+def test_export_is_fetched_with_a_header_not_a_token_in_the_url(client):
+    page = client.get("/").text
+    assert "createObjectURL" in page and 'token=" + encodeURIComponent' not in page

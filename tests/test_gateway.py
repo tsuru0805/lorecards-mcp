@@ -581,3 +581,43 @@ def test_a_forged_marker_does_not_swallow_the_users_words(gw):
                  json=openai_body(f"{forged}\n\nwhat is Alice up to?"))
     assert res.headers[gateway.INJECTED_HEADER] == "Alice"
     assert "not ours" in sent(c)["messages"][-1]["content"]
+
+
+def test_a_non_ascii_token_is_refused_at_startup(vault):
+    """compare_digest raises TypeError on non-ASCII text, and a header cannot carry it
+    anyway — so refuse it where the user can still fix it."""
+    with pytest.raises(ValueError, match="ASCII"):
+        gateway.check_token("密码")
+    with pytest.raises(ValueError, match="ASCII"):
+        gateway.build_gateway(vault, "http://upstream", token="密码")
+    assert gateway.check_token("s3cret") == "s3cret" and gateway.check_token(None) is None
+
+
+def test_a_non_ascii_token_in_a_request_is_401_not_500(gw):
+    c = gw(token="s3cret")
+    # bytes, because an httpx str header must be ASCII — but a raw client can send this,
+    # and ASGI hands it to us as a str with non-ASCII characters in it
+    res = c.post("/v1/chat/completions", json=openai_body("what is Alice up to?"),
+                 headers={gateway.TOKEN_HEADER.encode(): "café".encode("utf-8")})
+    assert res.status_code == 401
+
+
+def test_a_request_carrying_an_origin_is_refused(gw):
+    """A real API client never sends Origin; a web page always does. This is not a
+    browser API, so anything from a browser is a page trying to use someone's key."""
+    c = gw()
+    for path, body in (("/v1/chat/completions", openai_body("what is Alice up to?")),
+                       ("/v1/messages", anthropic_body("hi"))):
+        res = c.post(path, json=body, headers={"Origin": "http://attacker.example"})
+        assert res.status_code == 403
+    assert c.get("/v1/models", headers={"Origin": "http://attacker.example"}).status_code == 403
+    assert c.post("/v1/chat/completions", json=openai_body("hi")).status_code == 200
+
+
+def test_a_failed_ledger_write_leaves_no_temp_file(vault, monkeypatch):
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(gateway.os, "replace", boom)
+    gateway.save_ledger(vault, {"conversations": {"a": {"cards": {}, "seen": 0}}})
+    assert not list(gateway.ledger_path(vault).parent.glob("*.tmp"))
