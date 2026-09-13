@@ -1,5 +1,7 @@
 # lorecards
 
+English · [中文](README.zh-CN.md)
+
 A keyword-triggered **card book** for companion agents. One card per person, event, place,
 thing or in-joke the user has mentioned — plain Markdown with YAML frontmatter, in a folder
 they own. When the conversation mentions a card's keywords (anywhere in the last few turns,
