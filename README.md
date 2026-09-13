@@ -91,6 +91,18 @@ Install `lorecards` on PATH for that command: `uv tool install lorecards-mcp`, o
 `pipx install lorecards-mcp`, or point the hook at a virtualenv:
 `command: "/path/to/.venv/bin/lorecards hook --vault ~/cards"`.
 
+### From source
+
+```bash
+git clone https://github.com/tsuru0805/lorecards-mcp && cd lorecards-mcp
+python3 -m venv .venv && .venv/bin/pip install -e '.[zh]'
+.venv/bin/lorecards-mcp --vault ~/cards        # MCP server
+.venv/bin/lorecards try "hello" --vault ~/cards
+```
+
+Point your MCP config or your hook command at the absolute path of `.venv/bin/lorecards-mcp`
+or `.venv/bin/lorecards`.
+
 ### Start a vault
 
 ```bash
