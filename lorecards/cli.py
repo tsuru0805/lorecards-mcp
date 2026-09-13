@@ -239,7 +239,7 @@ def cmd_gateway(args: argparse.Namespace) -> int:
     gateway.run_gateway(resolve_vault(args.vault), args.upstream, host=args.host, port=args.port,
                         inject=args.inject, window=args.window,
                         reinject_after=args.reinject_after, budget_chars=args.budget,
-                        framing=args.framing)
+                        framing=args.framing, token=args.token, log_hits=not args.no_log)
     return 0
 
 
@@ -374,6 +374,10 @@ def build_parser() -> argparse.ArgumentParser:
     gw.add_argument("--budget", type=int, default=engine.DEFAULT_BUDGET_CHARS)
     gw.add_argument("--framing", default=gateway.DEFAULT_FRAMING,
                     help="the line that introduces the cards (default: %(default)r)")
+    gw.add_argument("--token", help=f"require {gateway.TOKEN_HEADER}: <token> on every "
+                                    "request (mandatory unless --host is localhost)")
+    gw.add_argument("--no-log", action="store_true",
+                    help="do not record what surfaced in the vault's hit ledger")
     gw.set_defaults(func=cmd_gateway)
     return p
 

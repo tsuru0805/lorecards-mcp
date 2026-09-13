@@ -31,6 +31,10 @@ First release.
   health check, import/export, archive and restore), plus the JSON API it is built on, so any
   other client can do the same. Works on a phone, installable as a PWA, no external requests.
   Beyond localhost a `--token` is required.
+- **Guards** — the UI API checks `Host` and `Origin` and requires `X-Lorecards: 1` on writes,
+  so another browser tab cannot reach a localhost vault; the gateway takes a `--token`
+  (its own header, never the upstream's `Authorization`) and requires one beyond localhost;
+  the dedupe ledger is written under a file lock with a unique temp name.
 - **Private sections** — sections named in `private_sections` (default `correspondence`) stay
   on the card and stay editable, but are never matched on and never injected.
 - **MCP server** (`lorecards-mcp`, stdio or streamable HTTP) with `write_card`, `read_card`

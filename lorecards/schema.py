@@ -170,8 +170,11 @@ def load_schema(vault_root: str | Path) -> CardSchema:
 
     dirs = dict(DEFAULT_KIND_DIRS)
     for kind, name in (raw.get("dirs") or {}).items() if isinstance(raw.get("dirs"), dict) else []:
-        if kind in dirs and isinstance(name, str) and name.strip():
-            dirs[kind] = name.strip().strip("/")
+        # a directory name is a single path segment, checked exactly like a card key:
+        # `..` or an absolute path here would write cards outside the vault
+        clean = safe_key(str(name)) if kind in dirs and isinstance(name, str) else None
+        if clean:
+            dirs[kind] = clean
 
     sections = {k: list(v) for k, v in DEFAULT_SECTIONS.items()}
     for kind, names in (raw.get("sections") or {}).items() if isinstance(raw.get("sections"), dict) else []:

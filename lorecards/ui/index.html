@@ -262,6 +262,10 @@ const KIND_LABEL = {
 const params = new URLSearchParams(location.search);
 if (params.get("token")) {
   try { localStorage.setItem("lorecards_token", params.get("token")); } catch (e) {}
+  // keep the token out of the address bar, history and any Referer we might send
+  params.delete("token");
+  const rest = params.toString();
+  history.replaceState(null, "", location.pathname + (rest ? "?" + rest : ""));
 }
 function token() {
   try { return localStorage.getItem("lorecards_token") || ""; } catch (e) { return ""; }
@@ -273,6 +277,8 @@ async function api(path, options) {
     opts.headers["Content-Type"] = "application/json";
   }
   if (token()) opts.headers["Authorization"] = "Bearer " + token();
+  // the server refuses writes without this: a cross-site form cannot send a custom header
+  opts.headers["X-Lorecards"] = "1";
   const res = await fetch(path, opts);
   const text = await res.text();
   let data = null;

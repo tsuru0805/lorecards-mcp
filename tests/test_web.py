@@ -9,10 +9,17 @@ from lorecards import engine, web
 from tests.conftest import write_card
 
 
+def ui_client(vault, **kwargs):
+    """A client shaped like the page itself: right Host, and the write guard header."""
+    app = web.build_app(vault, allowed_hosts={"testserver"}, **kwargs)
+    c = TestClient(app, headers={web.GUARD_HEADER: "1"})
+    c.vault = vault
+    return c
+
+
 @pytest.fixture
 def client(vault):
-    with TestClient(web.build_app(vault)) as c:
-        c.vault = vault
+    with ui_client(vault) as c:
         yield c
 
 
@@ -30,7 +37,7 @@ def test_kinds_describes_the_actual_schema(client):
 def test_kinds_follows_a_custom_kinds_yaml(vault):
     (vault / "kinds.yaml").write_text("dirs: {people: personnes}\nsections: {people: [qui]}\n",
                                       encoding="utf-8")
-    with TestClient(web.build_app(vault)) as c:
+    with ui_client(vault) as c:
         people = next(k for k in c.get("/api/kinds").json()["kinds"] if k["kind"] == "people")
     assert people["dir"] == "personnes" and people["sections"] == ["qui"]
 
@@ -265,7 +272,7 @@ def test_the_page_and_its_pwa_files_are_served(client):
 
 
 def test_token_guards_the_api_but_not_the_page(vault):
-    with TestClient(web.build_app(vault, token="s3cret")) as c:
+    with ui_client(vault, token="s3cret") as c:
         assert c.get("/api/cards").status_code == 401
         assert c.get("/api/cards").json()["error"] == "unauthorized"
         assert c.get("/api/cards", headers={"Authorization": "Bearer wrong"}).status_code == 401
@@ -297,3 +304,57 @@ def test_mtime_survives_a_javascript_number_round_trip(client):
     assert int(mangled) != int(card["mtime"])      # ...and it really is lossy
     card["fields"]["recent"] = "Saved from a browser."
     assert client.put("/api/cards/people/Alice", json=card).status_code == 200
+
+
+# --------------------------------------------------------------------------- CSRF / rebinding
+
+
+def test_cross_origin_requests_are_refused(vault):
+    """The attack this closes: a page on another site POSTs text/plain to localhost and
+    writes a card. The Origin no longer matches the Host, so it never reaches a handler."""
+    with ui_client(vault) as c:
+        evil = {"Origin": "http://attacker.example", web.GUARD_HEADER: "1"}
+        res = c.post("/api/cards", json=_payload(), headers=evil)
+        assert res.status_code == 403 and res.json()["error"] == "forbidden"
+        assert c.get("/api/cards", headers={"Origin": "http://attacker.example"}).status_code == 403
+        # our own origin is fine
+        assert c.get("/api/cards", headers={"Origin": "http://testserver"}).status_code == 200
+    assert not (vault / "places").exists()
+
+
+def test_writes_need_the_guard_header(vault):
+    """A cross-site form can post JSON-ish bodies but cannot add a custom header without a
+    preflight, and we answer no preflight."""
+    app = web.build_app(vault, allowed_hosts={"testserver"})
+    with TestClient(app) as c:                           # no guard header at all
+        assert c.post("/api/cards", json=_payload()).status_code == 403
+        assert c.put("/api/cards/people/Alice", json={}).status_code == 403
+        assert c.delete("/api/cards/people/Alice").status_code == 403
+        assert c.post("/api/try", json={"text": "Alice"}).status_code == 403
+        assert c.get("/api/cards").status_code == 200                     # reads are fine
+    assert (vault / "people" / "Alice.md").is_file()
+
+
+def test_an_unexpected_host_header_is_refused(vault):
+    """DNS rebinding: the attacker's name resolves to 127.0.0.1, so the browser sends
+    their name as Host. Only the names we actually serve are accepted."""
+    app = web.build_app(vault, host="127.0.0.1", port=8766)
+    with TestClient(app, headers={web.GUARD_HEADER: "1"}) as c:
+        assert c.get("/api/cards", headers={"Host": "attacker.example"}).status_code == 403
+        assert c.get("/api/cards", headers={"Host": "127.0.0.1:8766"}).status_code == 200
+        assert c.get("/api/cards", headers={"Host": "localhost:8766"}).status_code == 200
+        assert c.get("/", headers={"Host": "attacker.example"}).status_code == 200   # page only
+
+
+def test_allowed_hosts_include_the_bind_address(vault):
+    hosts = web.allowed_hosts_for("192.168.1.5", 8766)
+    assert "192.168.1.5:8766" in hosts and "localhost:8766" in hosts
+    assert "attacker.example" not in hosts
+    # binding every interface is only allowed with a token, and then any Host is accepted
+    assert web.build_app(vault, token="t", host="0.0.0.0", port=8766) is not None
+
+
+def test_the_page_sends_the_guard_header_and_clears_the_token_from_the_url(client):
+    page = client.get("/").text
+    assert '"X-Lorecards"] = "1"' in page
+    assert "history.replaceState" in page

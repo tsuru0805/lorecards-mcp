@@ -9,7 +9,11 @@ forwarding. Everything else is passed through untouched.
 Two things it is careful about:
 
 **Credentials.** ``Authorization``, ``x-api-key``, ``anthropic-version`` and every other
-header travel to the upstream unchanged. Nothing is stored, and no header is ever logged.
+header travel to the upstream unchanged. No header is ever stored or logged, and neither is
+any part of the model's reply. What *is* written to disk is the vault's own bookkeeping: the
+dedupe ledger (which card keys were injected, at which turn) and the hit ledger, which
+records the first 200 characters of the triggering message so the "recently surfaced" panel
+can show it. ``--no-log`` turns the hit ledger off.
 
 **Repeats.** A card that fires on five turns in a row would be paid for five times. Each
 conversation gets a small ledger of which cards were injected at which turn, and a card is
@@ -23,13 +27,22 @@ stands between the user and their model.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
+import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
+
+try:  # POSIX only; without it the ledger still uses unique temp names
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -41,11 +54,14 @@ try:  # mcp 2.x vendors its client as httpx2; mcp 1.x brings plain httpx
 except ImportError:  # pragma: no cover - whichever one is installed
     import httpx2 as httpx
 
-from . import engine, schema as sc
+from . import engine, schema as sc, web
 
 log = logging.getLogger("lorecards.gateway")
 
 DEFAULT_PORT = 8765
+LOOPBACK = ("127.0.0.1", "localhost", "::1", "[::1]")
+TOKEN_HEADER = "x-lorecards-token"     # never Authorization: that one belongs to the upstream
+HIT_TEXT_CHARS = 200
 DEFAULT_FRAMING = "A memory surfaces:\n\n"
 DEFAULT_WINDOW = 3
 DEFAULT_REINJECT_AFTER = 6
@@ -58,12 +74,17 @@ INJECTED_HEADER = "X-Lorecards-Injected"
 OPENAI_PATH = "/v1/chat/completions"
 ANTHROPIC_PATH = "/v1/messages"
 
-MARK_OPEN = "<!-- lorecards -->"
-MARK_CLOSE = "<!-- /lorecards -->"
+#: A per-process nonce, so we only ever strip blocks this process wrote. A user (or another
+#: proxy) can paste the literal marker text into a message without losing it.
+NONCE = secrets.token_hex(3)
+MARK_OPEN = f"<!-- lorecards:{NONCE} -->"
+MARK_CLOSE = f"<!-- /lorecards:{NONCE} -->"
 _MARK_RE = re.compile(re.escape(MARK_OPEN) + r".*?" + re.escape(MARK_CLOSE) + r"\s*", re.S)
 #: Headers that belong to one hop and must not be forwarded.
 _HOP_BY_HOP = {"host", "content-length", "connection", "keep-alive", "transfer-encoding",
                "upgrade", "proxy-authenticate", "proxy-authorization", "te", "trailer"}
+#: Headers our own server writes; passing the upstream's copy through duplicates them.
+_RESPONSE_DROP = _HOP_BY_HOP | {"date", "server"}
 
 
 def strip_marks(text: str) -> str:
@@ -177,6 +198,44 @@ def ledger_path(vault: str | Path) -> Path:
     return Path(vault).expanduser() / engine.STATE_DIRNAME / LEDGER_FILENAME
 
 
+_ledger_lock = threading.RLock()
+
+
+class _FileLock:
+    """Hold an exclusive lock on the ledger across processes for a read-modify-write.
+
+    Without it, two gateways sharing a vault can each read, then each write, and one of the
+    two updates is simply gone. On a platform without ``fcntl`` this degrades to the
+    in-process lock; the unique temp name still keeps the file itself intact.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path.with_suffix(".lock")
+        self.handle = None
+
+    def __enter__(self):
+        _ledger_lock.acquire()
+        if fcntl is None:
+            return self
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.handle = self.path.open("a+")
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+        except OSError as e:
+            log.warning("could not lock the injection ledger: %r", e)
+            self.handle = None
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if self.handle is not None:
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+                self.handle.close()
+        finally:
+            self.handle = None
+            _ledger_lock.release()
+
+
 def load_ledger(vault: str | Path) -> dict:
     path = ledger_path(vault)
     if not path.is_file():
@@ -196,7 +255,10 @@ def save_ledger(vault: str | Path, data: dict) -> None:
     path = ledger_path(vault)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        # a name no other writer can collide with: two processes sharing one temp file
+        # would otherwise interleave and leave torn JSON behind
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}."
+                             f"{secrets.token_hex(4)}.tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)
     except OSError as e:
@@ -226,7 +288,11 @@ def pick_new(vault: str | Path, conversation: str, keys: list[str], turn: int,
     out = []
     for key in keys:
         last = cards.get(key)
-        if isinstance(last, (int, float)) and turn - last < max(reinject_after, 0):
+        # `last > turn` means the client trimmed its history and the turn count went
+        # backwards. Treat that as a reset and inject again, rather than staying silent
+        # forever because of a number from a conversation that no longer exists.
+        if (isinstance(last, (int, float)) and last <= turn
+                and turn - last < max(reinject_after, 0)):
             continue
         out.append(key)
     return out
@@ -235,25 +301,27 @@ def pick_new(vault: str | Path, conversation: str, keys: list[str], turn: int,
 def record(vault: str | Path, conversation: str, keys: list[str], turn: int) -> None:
     if not keys:
         return
-    data = load_ledger(vault)
-    conv = data["conversations"].setdefault(conversation, {"cards": {}, "seen": 0})
-    conv.setdefault("cards", {})
-    for key in keys:
-        conv["cards"][key] = turn
-    conv["seen"] = time.time()
-    _trim(data)
-    save_ledger(vault, data)
+    with _FileLock(ledger_path(vault)):     # read-modify-write, so hold the lock across both
+        data = load_ledger(vault)
+        conv = data["conversations"].setdefault(conversation, {"cards": {}, "seen": 0})
+        conv.setdefault("cards", {})
+        for key in keys:
+            conv["cards"][key] = turn
+        conv["seen"] = time.time()
+        _trim(data)
+        save_ledger(vault, data)
 
 
 def next_turn(vault: str | Path, conversation: str) -> int:
     """A turn counter for callers with no turn count of their own (the Claude Code hook)."""
-    data = load_ledger(vault)
-    conv = data["conversations"].setdefault(conversation, {"cards": {}, "seen": 0})
-    conv["turn"] = int(conv.get("turn", 0)) + 1
-    conv["seen"] = time.time()
-    _trim(data)
-    save_ledger(vault, data)
-    return conv["turn"]
+    with _FileLock(ledger_path(vault)):
+        data = load_ledger(vault)
+        conv = data["conversations"].setdefault(conversation, {"cards": {}, "seen": 0})
+        conv["turn"] = int(conv.get("turn", 0)) + 1
+        conv["seen"] = time.time()
+        _trim(data)
+        save_ledger(vault, data)
+        return conv["turn"]
 
 
 # --------------------------------------------------------------------------- the proxy
@@ -264,13 +332,15 @@ class Injector:
 
     def __init__(self, vault: str | Path, *, inject: str = "user", window: int = DEFAULT_WINDOW,
                  reinject_after: int = DEFAULT_REINJECT_AFTER,
-                 budget_chars: int = engine.DEFAULT_BUDGET_CHARS, framing: str = DEFAULT_FRAMING):
+                 budget_chars: int = engine.DEFAULT_BUDGET_CHARS, framing: str = DEFAULT_FRAMING,
+                 log_hits: bool = True):
         self.vault = Path(vault).expanduser()
         self.inject = inject if inject in ("user", "system") else "user"
         self.window = window
         self.reinject_after = reinject_after
         self.budget_chars = budget_chars
         self.framing = framing
+        self.log_hits = log_hits
 
     def apply(self, body: dict, flavour: str, conv_header: str | None) -> list[str]:
         """Mutate ``body`` in place. Returns the keys injected (empty when nothing was)."""
@@ -300,30 +370,85 @@ class Injector:
         if not ok:
             return []
         record(self.vault, conversation, [c.key for c in chosen], turn)
-        engine.log_hits(self.vault, "gateway", chosen, text=query)
+        if self.log_hits:
+            engine.log_hits(self.vault, "gateway", chosen, text=query)
         return [c.key for c in chosen]
 
 
 def _forward_headers(request: Request) -> dict[str, str]:
-    """Every header except the hop-by-hop ones. Credentials pass through; none are logged."""
-    return {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
+    """Every header except the hop-by-hop ones and our own. Credentials pass through
+    untouched; none are logged."""
+    return {k: v for k, v in request.headers.items()
+            if k.lower() not in _HOP_BY_HOP and k.lower() != TOKEN_HEADER}
+
+
+def upstream_path(request: Request) -> str | None:
+    """The request path exactly as it arrived, or ``None`` if it tries to climb out.
+
+    ``raw_path`` keeps percent-encoding intact, so a path segment containing ``%2F`` reaches
+    the upstream as the client wrote it instead of turning into a directory separator. A
+    segment that decodes to ``..`` is refused: it would walk out of the upstream's prefix.
+    """
+    raw = request.scope.get("raw_path")
+    path = raw.decode("latin-1") if isinstance(raw, bytes) else request.url.path
+    path = path.split("?", 1)[0]
+    for segment in path.split("/"):
+        # decode once before judging: `..%2F..%2Fadmin` is one segment to a router but
+        # three path components to anything that unquotes it downstream
+        for part in unquote(segment).replace("\\", "/").split("/"):
+            if part.strip() in ("..", "."):
+                return None
+    return path
+
+
+def check_upstream(upstream: str) -> str:
+    """Validate ``--upstream``: an http(s) origin, nothing else."""
+    url = (upstream or "").strip().rstrip("/")
+    if not url.lower().startswith(("http://", "https://")):
+        raise ValueError(f"--upstream must be an http(s) URL, got {upstream!r}")
+    return url
 
 
 def build_gateway(vault: str | Path, upstream: str, *, inject: str = "user",
                   window: int = DEFAULT_WINDOW, reinject_after: int = DEFAULT_REINJECT_AFTER,
                   budget_chars: int = engine.DEFAULT_BUDGET_CHARS,
-                  framing: str = DEFAULT_FRAMING, client: Any = None) -> Starlette:
+                  framing: str = DEFAULT_FRAMING, log_hits: bool = True,
+                  token: str | None = None, host: str = "127.0.0.1", port: int = DEFAULT_PORT,
+                  allowed_hosts: set[str] | None = ..., client: Any = None) -> Starlette:
     """Build the proxy app. ``client`` lets tests pass in an httpx client of their own."""
-    base = upstream.rstrip("/")
+    base = check_upstream(upstream)
     injector = Injector(vault, inject=inject, window=window, reinject_after=reinject_after,
-                        budget_chars=budget_chars, framing=framing)
+                        budget_chars=budget_chars, framing=framing, log_hits=log_hits)
+    if allowed_hosts is ...:
+        allowed_hosts = (None if host in ("0.0.0.0", "::") and token
+                         else web.allowed_hosts_for(host, port))
 
     def http_client() -> Any:
         return client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
 
+    def refuse(request: Request) -> Response | None:
+        """Host and token checks, before anything is forwarded or read."""
+        host_header = (request.headers.get("host") or "").lower()
+        if allowed_hosts is not None and host_header not in allowed_hosts:
+            return JSONResponse({"error": {"message": f"lorecards: unexpected Host header "
+                                                      f"{host_header!r}",
+                                           "type": "forbidden"}}, status_code=403)
+        if token:
+            given = request.headers.get(TOKEN_HEADER, "")
+            if not hmac.compare_digest(given, token):
+                return JSONResponse({"error": {"message": f"lorecards: send {TOKEN_HEADER}: "
+                                                          "<token>",
+                                               "type": "unauthorized"}}, status_code=401)
+        return None
+
     async def relay(request: Request, body: bytes | None, injected: list[str]) -> Response:
         """Stream the upstream response straight back, keeping its status and headers."""
-        url = base + request.url.path + (("?" + request.url.query) if request.url.query else "")
+        path = upstream_path(request)
+        if path is None:
+            return JSONResponse({"error": {"message": "lorecards: refusing a path that "
+                                                      "climbs out of the upstream",
+                                           "type": "bad_request"}}, status_code=400)
+        url = base + path + (("?" + request.url.query) if request.url.query else "")
         headers = _forward_headers(request)
         if body is None:
             body = await request.body()
@@ -348,12 +473,16 @@ def build_gateway(vault: str | Path, upstream: str, *, inject: str = "user",
                 if owned:
                     await cli.aclose()
 
-        out = {k: v for k, v in response.headers.items() if k.lower() not in _HOP_BY_HOP}
-        if injected:
+        out = {k: v for k, v in response.headers.items() if k.lower() not in _RESPONSE_DROP}
+        # only claim an injection the upstream actually accepted
+        if injected and 200 <= response.status_code < 300:
             out[INJECTED_HEADER] = ",".join(injected)
         return StreamingResponse(stream(), status_code=response.status_code, headers=out)
 
     async def chat(request: Request) -> Response:
+        denied = refuse(request)
+        if denied is not None:
+            return denied
         flavour = "anthropic" if request.url.path.rstrip("/").endswith("/messages") else "openai"
         raw = await request.body()
         injected: list[str] = []
@@ -371,6 +500,9 @@ def build_gateway(vault: str | Path, upstream: str, *, inject: str = "user",
         return await relay(request, raw, injected)
 
     async def passthrough(request: Request) -> Response:
+        denied = refuse(request)
+        if denied is not None:
+            return denied
         return await relay(request, None, [])
 
     routes = [
@@ -385,13 +517,22 @@ def build_gateway(vault: str | Path, upstream: str, *, inject: str = "user",
 
 
 def run_gateway(vault: str | Path, upstream: str, *, host: str = "127.0.0.1",
-                port: int = DEFAULT_PORT, **kwargs) -> None:
+                port: int = DEFAULT_PORT, token: str | None = None, **kwargs) -> None:
+    """Serve the proxy. Refuses to listen beyond localhost without a token."""
     import uvicorn  # noqa: PLC0415
 
+    upstream = check_upstream(upstream)
+    if host not in LOOPBACK and not token:
+        raise SystemExit(
+            f"refusing to serve on {host} without --token: anyone who can reach that address "
+            "could spend your API key and read your cards. Pass --token <secret>, or keep "
+            "the default host.")
     vault_path = Path(vault).expanduser()
     vault_path.mkdir(parents=True, exist_ok=True)
     print(f"lorecards gateway  vault: {vault_path}")
     print(f"                   upstream: {upstream}")
     print(f"                   base URL for your client: http://{host}:{port}/v1")
-    uvicorn.run(build_gateway(vault_path, upstream, **kwargs), host=host, port=port,
-                log_level="warning")
+    if token:
+        print(f"                   clients must send  {TOKEN_HEADER}: <your token>")
+    uvicorn.run(build_gateway(vault_path, upstream, token=token, host=host, port=port, **kwargs),
+                host=host, port=port, log_level="warning")

@@ -9,12 +9,18 @@ API checks as ``Authorization: Bearer <token>`` (or a ``?token=`` query paramete
 phone can open the page from a link). Static files are public either way: they carry no
 card data.
 
+Against the other browser tab, ``/api/*`` also checks the ``Host`` header (so a rebound
+name cannot reach it), rejects a request whose ``Origin`` is not this server, and requires
+``X-Lorecards: 1`` on every write — a header a cross-site form cannot send without a
+preflight, and we answer no preflight.
+
 Runs on starlette + uvicorn, both of which the ``mcp`` SDK already brings in — no extra
 dependency for people who only want the server.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import struct
 import zlib
@@ -33,6 +39,11 @@ from starlette.routing import Route
 from . import engine, io as lore_io, schema as sc
 
 DEFAULT_PORT = 8766
+LOOPBACK = ("127.0.0.1", "localhost", "::1", "[::1]")
+#: Every write must carry this header. A browser cannot send it cross-origin without a
+#: preflight, and a preflight we never answer, so a page on another site cannot write here.
+GUARD_HEADER = "x-lorecards"
+WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 STATIC_FILES = {"/": ("index.html", "text/html; charset=utf-8"),
                 "/index.html": ("index.html", "text/html; charset=utf-8"),
                 "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
@@ -143,12 +154,73 @@ def _kind_and_key(request: Request) -> tuple[str, str]:
     return kind, key
 
 
+# --------------------------------------------------------------------------- security
+
+
+def allowed_hosts_for(host: str, port: int) -> set[str]:
+    """Host headers this server will answer to, so a page on another site cannot reach it
+    by rebinding a name to 127.0.0.1 (the browser would send that name as Host)."""
+    hosts = {f"{h}:{port}" for h in LOOPBACK}
+    hosts |= {h for h in LOOPBACK}          # a default port is omitted from Host
+    if host and host not in LOOPBACK and host not in ("0.0.0.0", "::"):
+        hosts.add(f"{host}:{port}")
+        hosts.add(host)
+    return hosts
+
+
+def security_guard(allowed_hosts: set[str] | None, token: str | None):
+    """Guard /api/*: Host, Origin, a header a cross-site form cannot send, and the token.
+
+    Static files stay open: they hold no card data, and the page must load before it can
+    send anything. ``allowed_hosts=None`` means any Host is accepted, which only happens
+    when the server was told to bind every interface — and that requires a token.
+    """
+    def deny(detail: str, code: int = 403):
+        return JSONResponse({"error": "forbidden" if code == 403 else "unauthorized",
+                             "detail": detail}, status_code=code)
+
+    async def guard(request: Request, call_next):
+        if not request.url.path.startswith("/api/"):
+            return await call_next(request)
+
+        host = (request.headers.get("host") or "").lower()
+        if allowed_hosts is not None and host not in allowed_hosts:
+            return deny(f"unexpected Host header: {host!r}")
+
+        origin = request.headers.get("origin")
+        if origin:
+            netloc = origin.split("://", 1)[-1].lower()
+            if netloc != host:
+                return deny("cross-origin requests are not accepted")
+
+        if request.method in WRITE_METHODS and request.headers.get(GUARD_HEADER) != "1":
+            return deny(f"writes must carry the {GUARD_HEADER}: 1 header")
+
+        if token:
+            header = request.headers.get("authorization", "")
+            given = (header[7:] if header.lower().startswith("bearer ")
+                     else request.query_params.get("token", ""))
+            if not hmac.compare_digest(given, token):
+                return deny("send Authorization: Bearer <token>", 401)
+        return await call_next(request)
+
+    return guard
+
+
 # --------------------------------------------------------------------------- app
 
 
-def build_app(vault: str | Path, token: str | None = None) -> Starlette:
-    """Build the Starlette app for one vault."""
+def build_app(vault: str | Path, token: str | None = None, *, host: str = "127.0.0.1",
+              port: int = DEFAULT_PORT, allowed_hosts: set[str] | None = ...) -> Starlette:
+    """Build the Starlette app for one vault.
+
+    ``allowed_hosts`` defaults to the loopback names plus the bind address; pass a set to
+    override it, or ``None`` to accept any Host (only sensible behind a token).
+    """
     vault_path = Path(vault).expanduser()
+    if allowed_hosts is ...:
+        allowed_hosts = (None if host in ("0.0.0.0", "::") and token
+                         else allowed_hosts_for(host, port))
 
     def schema() -> sc.CardSchema:
         return sc.load_schema(vault_path)
@@ -316,19 +388,8 @@ def build_app(vault: str | Path, token: str | None = None) -> Starlette:
         Route("/api/import", api_import, methods=["POST"]),
         Route("/api/export", api_export, methods=["GET"]),
     ]
-    async def require_token(request: Request, call_next):
-        """Guard /api/* only: the page and the PWA files carry no card data."""
-        if request.url.path.startswith("/api/"):
-            header = request.headers.get("authorization", "")
-            given = (header[7:] if header.lower().startswith("bearer ")
-                     else request.query_params.get("token", ""))
-            if given != token:
-                return JSONResponse({"error": "unauthorized",
-                                     "detail": "send Authorization: Bearer <token>"},
-                                    status_code=401)
-        return await call_next(request)
-
-    middleware = [Middleware(BaseHTTPMiddleware, dispatch=require_token)] if token else []
+    middleware = [Middleware(BaseHTTPMiddleware,
+                             dispatch=security_guard(allowed_hosts, token))]
     app = Starlette(routes=routes, middleware=middleware,
                     exception_handlers={HTTPException: on_error, ApiError: on_error})
     app.state.vault = vault_path
@@ -352,4 +413,5 @@ def run_ui(vault: str | Path, host: str = "127.0.0.1", port: int = DEFAULT_PORT,
     print(f"              open: http://{shown}:{port}/{suffix}")
     if not token:
         print("              (no token: anyone who can reach this port can edit the vault)")
-    uvicorn.run(build_app(vault_path, token), host=host, port=port, log_level="warning")
+    uvicorn.run(build_app(vault_path, token, host=host, port=port), host=host, port=port,
+                log_level="warning")

@@ -29,8 +29,10 @@ behind the user's back. A card book is **canon**: what the user (or the agent, t
 
 ## Install
 
+Not on PyPI yet — [install from source](#from-source) for now. Once it is published,
+`pipx install lorecards-mcp` (or `uv tool install lorecards-mcp`) will be the short way.
+
 ```bash
-pipx install lorecards-mcp        # or: uv tool install lorecards-mcp
 lorecards init ~/cards            # the directories, plus one example card per kind
 ```
 
@@ -89,8 +91,24 @@ x-lorecards-injected: the Friday deploy
 | `--reinject-after` | `6` | turns before the same card may be injected again (`0` = every time) |
 | `--budget` | `800` | characters of cards per injection |
 | `--framing` | `"A memory surfaces:\n\n"` | the line that introduces the cards |
+| `--token` | — | require `X-Lorecards-Token: <token>` on every request; **mandatory unless `--host` is localhost** |
+| `--no-log` | off | do not record what surfaced in the hit ledger |
 
-Injected text is wrapped in `<!-- lorecards -->` markers, which are stripped out again when
+**From a phone**, the gateway must listen beyond localhost, and then a token is required —
+otherwise anyone on the network could spend your API key:
+
+```bash
+lorecards gateway --vault ~/cards --upstream https://api.openai.com \
+  --host 0.0.0.0 --token "$(openssl rand -hex 16)"
+```
+
+The client then has to send `X-Lorecards-Token: <that token>` — a separate header, so it
+never collides with the `Authorization` your client sends to the upstream. In a client that
+lets you add custom headers (SillyTavern does), add it there. `--host 0.0.0.0` without
+`--token` refuses to start.
+
+Injected text is wrapped in `<!-- lorecards:… -->` markers (the suffix is a per-process
+nonce, so we only ever strip our own), which are stripped out again when
 the next turn is scanned — otherwise a card would keep itself alive by quoting its own
 keywords. If anything on our side fails (unreadable vault, odd body shape), the request is
 forwarded unchanged: the proxy never stands between you and your model.
@@ -178,9 +196,15 @@ lorecards ui --vault ~/cards --host 0.0.0.0 --token "$(openssl rand -hex 16)"
 ```
 
 `--host` anything other than localhost **requires** `--token`, which the API then checks as
-`Authorization: Bearer <token>` (the `?token=` in the link is stored by the page and sent as
-that header afterwards). On localhost there is no authentication at all: anyone who can
-reach the port can edit the vault.
+`Authorization: Bearer <token>` (the `?token=` in the link is stored by the page, wiped from
+the address bar, and sent as that header afterwards). On localhost there is no token at all:
+anyone who can reach the port can edit the vault.
+
+Against the *other* browser tab, `/api/*` is guarded even without a token: the `Host` header
+must be one this server actually serves (so a rebound name cannot reach it), a request whose
+`Origin` is a different site is refused, and every write must carry `X-Lorecards: 1` — a
+header a cross-site form cannot add without a preflight, which we never answer. Static files
+stay open; they hold no card data.
 
 *(Screenshots: to be added.)*
 
@@ -203,6 +227,9 @@ app or a shell script can do the same. All errors are `{"error": code, "detail":
 | `GET` | `/api/checkup` | cards with no keywords, keywords too generic to be useful, titles that do not match the file name |
 | `POST` | `/api/import` | `{"book": <SillyTavern JSON>, "kind": "entry", "force": false}` |
 | `GET` | `/api/export` | the vault as a SillyTavern lorebook |
+
+Writes (`POST` / `PUT` / `DELETE`) must send `X-Lorecards: 1`, and a request carrying an
+`Origin` from another site is refused. With `--token`, add `Authorization: Bearer <token>`.
 
 `mtime` is a **string**: it is nanosecond-resolution and would lose precision as a JSON
 number in a browser, which would break every optimistic-locking check.
@@ -308,8 +335,25 @@ times the tokens, for something already sitting in the context window. So:
 - The response carries `X-Lorecards-Injected: key1,key2` when anything was injected, which is
   the quickest way to see what is happening.
 - If the ledger cannot be read, it is rebuilt empty and the request still goes through.
+- A turn index that goes *backwards* (the client trimmed its history) is treated as a new
+  clock rather than a reason to stay silent forever.
+- Read-modify-write is done under a file lock, so two gateways sharing one vault do not
+  overwrite each other.
 
 `--reinject-after 0` turns dedupe off and injects on every match.
+
+### What gets written to disk
+
+Your API key and the model's replies are never stored or logged. Two files under
+`<vault>/.lorecards/` are:
+
+| file | what is in it |
+| --- | --- |
+| `injections.json` | per conversation: which card keys were injected, at which turn, and when it was last seen. No message text. |
+| `hits.jsonl` | one line per surfacing: timestamp, source (`gateway` / `hook` / `try`), the card keys, the words that matched, and **the first 200 characters of the triggering message** — this is what the *recently surfaced* panel shows. |
+
+`lorecards gateway --no-log` and `lorecards hook --no-log` skip `hits.jsonl` entirely;
+dedupe still works, since that lives in the other file. Delete either file at any time.
 
 ## Import / export (SillyTavern lorebooks)
 
@@ -390,6 +434,10 @@ lorecards init ~/cards            create the vault with one example card per kin
 lorecards import book.json        SillyTavern lorebook in
 lorecards export out.json         SillyTavern lorebook out
 lorecards hook                    the Claude Code UserPromptSubmit hook
+
+  gateway: --token, --no-log, --inject, --window, --reinject-after, --budget, --framing
+  ui:      --token, --host, --port
+  hook:    --reinject-after, --no-log, --budget, --scan-depth
 ```
 
 `--vault` works on either side of the subcommand, and falls back to `$LORECARDS_VAULT`, then
@@ -409,6 +457,8 @@ lorecards hook                    the Claude Code UserPromptSubmit hook
   no authentication at all. It is a tool for the person whose cards they are.
 - One vault per process. Several characters or profiles means several gateways or several
   entries in your MCP config, one `--vault` each.
+- The dedupe ledger is a single JSON file per vault, rewritten whole under a lock. That is
+  fine for one person's conversations; it is not built for dozens of concurrent writers.
 - Cards are cached on file mtime and size, so an edit takes effect on the next lookup — but a
   change that keeps both identical will not be noticed.
 - No pagination: a very large book still loads every card into memory at lookup time.

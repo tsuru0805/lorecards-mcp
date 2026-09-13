@@ -88,6 +88,7 @@ def gw(vault, upstream):
                                base_url="http://upstream")
 
     def make(**kwargs):
+        kwargs.setdefault("allowed_hosts", {"testserver"})
         app = gateway.build_gateway(vault, "http://upstream", client=client, **kwargs)
         c = TestClient(app)
         c.seen = upstream.state.seen
@@ -387,7 +388,8 @@ def _boom(*a, **k):
 
 
 def test_an_unreachable_upstream_answers_502(vault):
-    app = gateway.build_gateway(vault, "http://127.0.0.1:9")     # discard port
+    app = gateway.build_gateway(vault, "http://127.0.0.1:9",     # discard port
+                                allowed_hosts={"testserver"})
     with TestClient(app) as c:
         res = c.post("/v1/chat/completions", json=openai_body("hello"))
     assert res.status_code == 502 and "lorecards" in res.json()["error"]["message"]
@@ -409,3 +411,173 @@ def test_text_of_ignores_tool_and_image_blocks():
 def test_strip_marks_removes_a_whole_block():
     text = gateway.wrap("### Alice\nsome card") + "\n\nwhat is up?"
     assert gateway.strip_marks(text).strip() == "what is up?"
+
+
+# --------------------------------------------------------------------------- guards
+
+
+def test_a_token_is_required_when_one_is_configured(gw):
+    c = gw(token="s3cret")
+    body = openai_body("what is Alice up to?")
+    assert c.post("/v1/chat/completions", json=body).status_code == 401
+    assert c.post("/v1/chat/completions", json=body,
+                  headers={gateway.TOKEN_HEADER: "wrong"}).status_code == 401
+    ok = c.post("/v1/chat/completions", json=body, headers={gateway.TOKEN_HEADER: "s3cret"})
+    assert ok.status_code == 200 and ok.headers[gateway.INJECTED_HEADER] == "Alice"
+    # passthrough paths are guarded too
+    assert c.get("/v1/models").status_code == 401
+
+
+def test_our_token_never_reaches_the_upstream(gw):
+    c = gw(token="s3cret")
+    c.post("/v1/chat/completions", json=openai_body("what is Alice up to?"),
+           headers={gateway.TOKEN_HEADER: "s3cret", "Authorization": "Bearer sk-real"})
+    headers = c.seen["headers"][-1]
+    assert headers["authorization"] == "Bearer sk-real"     # theirs goes through
+    assert gateway.TOKEN_HEADER not in headers              # ours does not
+
+
+def test_serving_beyond_localhost_without_a_token_is_refused(vault):
+    with pytest.raises(SystemExit) as e:
+        gateway.run_gateway(vault, "https://api.openai.com", host="0.0.0.0", port=8765)
+    assert "--token" in str(e.value)
+
+
+def test_an_unexpected_host_header_is_refused(gw):
+    c = gw(allowed_hosts={"127.0.0.1:8765"})
+    assert c.post("/v1/chat/completions", json=openai_body("hi"),
+                  headers={"Host": "attacker.example"}).status_code == 403
+    assert c.post("/v1/chat/completions", json=openai_body("what is Alice up to?"),
+                  headers={"Host": "127.0.0.1:8765"}).status_code == 200
+
+
+def test_upstream_must_be_http(vault):
+    for bad in ("file:///etc/passwd", "ftp://host", "api.openai.com", ""):
+        with pytest.raises(ValueError):
+            gateway.build_gateway(vault, bad)
+
+
+def test_paths_that_climb_out_of_the_upstream_are_refused(gw):
+    """An encoded `..` is not normalised by the client, so it arrives intact and would
+    otherwise be pasted onto the upstream base and walk out of its path prefix."""
+    c = gw()
+    for path in ("/v1/..%2F..%2Fadmin", "/v1/%2e%2e/admin", "/%2e%2e/%2e%2e/admin"):
+        assert c.get(path).status_code == 400, path
+    assert c.get("/v1/models").status_code == 200
+
+
+def test_percent_encoding_in_a_path_survives(vault):
+    """`raw_path` keeps the client's encoding, so `%2F` inside a segment is forwarded as
+    written instead of turning into a path separator."""
+    class _Req:
+        def __init__(self, raw, path):
+            self.scope = {"raw_path": raw}
+            self.url = type("u", (), {"path": path, "query": ""})()
+
+    assert gateway.upstream_path(_Req(b"/v1/models%2Fx", "/v1/models/x")) == "/v1/models%2Fx"
+    assert gateway.upstream_path(_Req(b"/v1/chat/completions", "/v1/chat/completions")) \
+        == "/v1/chat/completions"
+    assert gateway.upstream_path(_Req(b"/v1/%2e%2e/admin", "/v1/../admin")) is None
+    # no raw_path (some servers omit it): fall back to the parsed path
+    assert gateway.upstream_path(_Req(None, "/v1/models")) == "/v1/models"
+
+
+def test_the_injected_header_is_only_claimed_on_success(gw):
+    c = gw()
+    res = c.post("/v1/boom/429", json=openai_body("what is Alice up to?"))
+    assert res.status_code == 429 and gateway.INJECTED_HEADER not in res.headers
+
+
+def test_date_and_server_headers_are_not_duplicated(gw):
+    c = gw()
+    res = c.post("/v1/chat/completions", json=openai_body("hi"))
+    assert len(res.headers.get_list("date")) <= 1
+    assert len(res.headers.get_list("server")) <= 1
+
+
+# --------------------------------------------------------------------------- ledger
+
+
+def test_a_turn_index_that_went_backwards_is_treated_as_a_reset(gw, vault):
+    """A client that trims its history sends fewer user messages, so the turn count drops.
+    Without this, a card injected at turn 40 would never be injected again."""
+    conv = "conv-rewind"
+    gateway.record(vault, conv, ["Alice"], turn=40)
+    assert gateway.pick_new(vault, conv, ["Alice"], turn=41, reinject_after=6) == []
+    assert gateway.pick_new(vault, conv, ["Alice"], turn=2, reinject_after=6) == ["Alice"]
+
+    c = gw()
+    head = {gateway.CONVERSATION_HEADER: conv}
+    res = c.post("/v1/chat/completions", json=openai_body("what is Alice up to?"), headers=head)
+    assert res.headers[gateway.INJECTED_HEADER] == "Alice"
+    # the clock is rewritten, not merely ignored
+    assert gateway.load_ledger(vault)["conversations"][conv]["cards"]["Alice"] == 1
+
+
+def test_concurrent_writers_do_not_lose_each_other(vault):
+    """Two gateways sharing a vault, each doing read-modify-write on the same ledger."""
+    import subprocess
+    import sys
+    script = (
+        "import sys;from lorecards import gateway;"
+        "v=sys.argv[1];i=int(sys.argv[2]);"
+        "[gateway.record(v, f'conv-{i}-{n}', ['Alice'], turn=n) for n in range(25)]"
+    )
+    procs = [subprocess.Popen([sys.executable, "-c", script, str(vault), str(i)])
+             for i in range(4)]
+    assert all(p.wait(timeout=120) == 0 for p in procs)
+    convs = gateway.load_ledger(vault)["conversations"]
+    assert len(convs) == 100, f"a writer's updates were lost: {len(convs)} of 100"
+    assert not list(gateway.ledger_path(vault).parent.glob("*.tmp"))
+
+
+def test_the_ledger_temp_file_name_is_unique(vault, monkeypatch):
+    written = []
+    real = pathlib_write = None
+
+    def fake_replace(src, dst):
+        written.append(str(src))
+
+    monkeypatch.setattr(gateway.os, "replace", fake_replace)
+    gateway.save_ledger(vault, {"conversations": {}})
+    gateway.save_ledger(vault, {"conversations": {}})
+    assert len(set(written)) == 2 and all(".tmp" in w for w in written)
+    for leftover in gateway.ledger_path(vault).parent.glob("*.tmp"):
+        leftover.unlink()
+
+
+# --------------------------------------------------------------------------- hit ledger
+
+
+def test_the_hit_ledger_records_the_triggering_message(gw, vault):
+    c = gw()
+    c.post("/v1/chat/completions", json=openai_body("what is Alice up to these days?"))
+    entry = engine.read_hits(vault)[0]
+    assert entry["source"] == "gateway" and entry["keys"] == ["Alice"]
+    assert entry["text"] == "what is Alice up to these days?"     # documented, and capped
+    assert set(entry) == {"ts", "source", "keys", "hits", "text"}
+
+
+def test_no_log_keeps_the_hit_ledger_empty_but_still_dedupes(gw, vault):
+    c = gw(log_hits=False)
+    res = c.post("/v1/chat/completions", json=openai_body("what is Alice up to?"),
+                 headers={gateway.CONVERSATION_HEADER: "quiet"})
+    assert res.headers[gateway.INJECTED_HEADER] == "Alice"
+    assert engine.read_hits(vault) == []                          # nothing written
+    assert gateway.load_ledger(vault)["conversations"]["quiet"]["cards"] == {"Alice": 1}
+    assert gateway.INJECTED_HEADER not in c.post(
+        "/v1/chat/completions", json=openai_body("what is Alice up to?"),
+        headers={gateway.CONVERSATION_HEADER: "quiet"}).headers
+
+
+def test_a_forged_marker_does_not_swallow_the_users_words(gw):
+    """The markers carry a per-process nonce, so text a user pasted that merely looks like
+    ours is left alone — and so is a block written by a different lorecards process."""
+    forged = "<!-- lorecards:deadbe -->\nnot ours\n<!-- /lorecards:deadbe -->"
+    assert gateway.strip_marks(forged + "\n\nwhat is Alice up to?") == \
+        forged + "\n\nwhat is Alice up to?"
+    c = gw()
+    res = c.post("/v1/chat/completions",
+                 json=openai_body(f"{forged}\n\nwhat is Alice up to?"))
+    assert res.headers[gateway.INJECTED_HEADER] == "Alice"
+    assert "not ours" in sent(c)["messages"][-1]["content"]

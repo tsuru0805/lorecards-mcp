@@ -19,8 +19,10 @@
 
 ## 安装
 
+还没发到 PyPI，目前请[从源码装](#从源码装)。发包之后 `pipx install lorecards-mcp`
+（或 `uv tool install lorecards-mcp`）就是最短的那条路。
+
 ```bash
-pipx install lorecards-mcp        # 或者 uv tool install lorecards-mcp
 lorecards init ~/cards            # 建目录，每种卡各放一张示例
 ```
 
@@ -70,8 +72,20 @@ x-lorecards-injected: the Friday deploy
 | `--reinject-after` | `6` | 同一张卡隔几轮才允许再注入（`0`＝每次都注） |
 | `--budget` | `800` | 单次注入的字数预算 |
 | `--framing` | `"A memory surfaces:\n\n"` | 领起卡片的那句话 |
+| `--token` | 无 | 要求每个请求带 `X-Lorecards-Token: <token>`；**`--host` 不是 localhost 时必填** |
+| `--no-log` | 关 | 不往命中账本里记 |
 
-注入的内容用 `<!-- lorecards -->` 包起来，下一轮扫描时会被剥掉——否则卡片会靠复述自己的关键词让自己永远留在场上。我们这边任何一环出问题（vault 读不了、请求体形状不对），请求都原样转发：代理永远不挡在你和模型之间。
+**手机访问**时网关必须监听到局域网，这时必须带 token——否则同网段的任何人都能花你的 API key：
+
+```bash
+lorecards gateway --vault ~/cards --upstream https://api.openai.com \
+  --host 0.0.0.0 --token "$(openssl rand -hex 16)"
+```
+
+客户端要发 `X-Lorecards-Token: <这串>`——单独一个头，不占用你发给上游的 `Authorization`。
+能自定义请求头的客户端（SillyTavern 就可以）加在那里即可。`--host 0.0.0.0` 不带 `--token` 会拒绝启动。
+
+注入的内容用 `<!-- lorecards:… -->` 包起来（后缀是进程级随机串，保证只剥自己写的），下一轮扫描时会被剥掉——否则卡片会靠复述自己的关键词让自己永远留在场上。我们这边任何一环出问题（vault 读不了、请求体形状不对），请求都原样转发：代理永远不挡在你和模型之间。
 
 ### 2. Claude Code hook
 
@@ -140,7 +154,9 @@ lorecards ui --vault ~/cards --host 0.0.0.0 --token "$(openssl rand -hex 16)"
 # 打开 http://<你电脑的局域网地址>:8766/?token=<刚才那串>
 ```
 
-`--host` 只要不是 localhost 就**必须**带 `--token`，API 按 `Authorization: Bearer <token>` 校验（链接里的 `?token=` 由网页存下来，之后都走请求头）。本机访问则完全没有鉴权：能连上这个端口的人就能改 vault。
+`--host` 只要不是 localhost 就**必须**带 `--token`，API 按 `Authorization: Bearer <token>` 校验（链接里的 `?token=` 由网页存下来、从地址栏抹掉，之后都走请求头）。本机访问则没有 token：能连上这个端口的人就能改 vault。
+
+至于**浏览器里的另一个标签页**，即使没有 token，`/api/*` 也有闸：`Host` 必须是本服务真正在服务的名字（DNS 重绑定过不来）、`Origin` 是别的站点一律拒、每个写操作必须带 `X-Lorecards: 1`——跨站表单加不了自定义头，而预检我们不应答。静态文件不设防，它们不含任何卡片数据。
 
 *（截图：稍后补。）*
 
@@ -162,6 +178,9 @@ lorecards ui --vault ~/cards --host 0.0.0.0 --token "$(openssl rand -hex 16)"
 | `GET` | `/api/checkup` | 没关键词的卡、泛到每轮都命中的词、标题与文件名不一致 |
 | `POST` | `/api/import` | `{"book": <SillyTavern JSON>, "kind": "entry", "force": false}` |
 | `GET` | `/api/export` | 整个 vault 导成 SillyTavern 世界书 |
+
+写操作（`POST` / `PUT` / `DELETE`）必须带 `X-Lorecards: 1`；带着别站 `Origin` 的请求一律拒。
+配了 `--token` 就再加 `Authorization: Bearer <token>`。
 
 `mtime` 是**字符串**：它是纳秒精度，当 JSON 数字进浏览器会掉精度，那样乐观锁每次都会误判。
 
@@ -250,8 +269,22 @@ private_sections: [通信脉络]
 - 账本在 `<vault>/.lorecards/injections.json`，原子写，每会话最多 200 张卡、总共 500 段会话（超了按最久未见先淘汰）。
 - 注入了就在响应头带 `X-Lorecards-Injected: key1,key2`，这是看清发生了什么最快的办法。
 - 账本读不出来就当空的重建，请求照常转发。
+- 轮次**倒退**（客户端截断了历史）视为换了一个时钟，允许重新注入，而不是从此永远沉默。
+- 读-改-写全程持文件锁，两个网关共用一个 vault 也不会互相覆盖。
 
 `--reinject-after 0` 关掉去重，命中就注。
+
+### 会往磁盘上写什么
+
+你的 API key 和模型的回复都不存、不记。`<vault>/.lorecards/` 下有两个文件：
+
+| 文件 | 里面是什么 |
+| --- | --- |
+| `injections.json` | 每段会话：注入过哪些卡、在第几轮、最后一次见到是什么时候。**不含消息正文**。 |
+| `hits.jsonl` | 每次浮现一行：时间戳、来源（`gateway` / `hook` / `try`）、卡的 key、命中的词，以及**触发那句话的前 200 字**——「最近浮现」面板显示的就是它。 |
+
+`lorecards gateway --no-log` 和 `lorecards hook --no-log` 完全不写 `hits.jsonl`；
+去重不受影响（它在另一个文件里）。这两个文件随时可以删。
 
 ## 导入 / 导出（SillyTavern 世界书）
 
@@ -321,6 +354,10 @@ lorecards init ~/cards          建 vault，每种卡一张示例
 lorecards import book.json      导入 SillyTavern 世界书
 lorecards export out.json       导出成 SillyTavern 世界书
 lorecards hook                  Claude Code 的 UserPromptSubmit hook
+
+  gateway：--token、--no-log、--inject、--window、--reinject-after、--budget、--framing
+  ui：     --token、--host、--port
+  hook：   --reinject-after、--no-log、--budget、--scan-depth
 ```
 
 `--vault` 放在子命令前后都行；没给就依次取 `$LORECARDS_VAULT`、`~/.lorecards`。
@@ -332,9 +369,14 @@ lorecards hook                  Claude Code 的 UserPromptSubmit hook
 - 去重按上面那套会话身份来。客户端如果每次请求都换 system prompt，又不带 `X-Lorecards-Conversation` 头，那每次都会被当成新会话。
 - **网页编辑器没有多用户、没有权限概念**：一个 vault、一个编辑者、没有操作记录；本机访问时完全没有鉴权。它是给「卡就是你自己的」那个人用的工具。
 - 一个进程一个 vault。多个角色或多套人设就开多个网关，或者在 MCP 配置里写多条，各自一个 `--vault`。
+- 去重账本是每个 vault 一个 JSON 文件，持锁整体重写。一个人的对话量完全够用，但不是为几十个并发写者设计的。
 - 卡按文件的 mtime 和大小缓存，所以用编辑器改了卡，下次查询就生效——但一次改动如果两者都没变，是不会被察觉的。
 - `write_card(mode="update_recent")` 写之前会再核一次文件 mtime，文件在它读写之间变过就拒绝。这不是锁：两个 agent 在同一毫秒写同一张卡不在设计范围内。
 - 没有分页：书很大时，每次查询仍然把全部卡加载进内存。
+
+## 许可证与出处
+
+MIT 许可。源自一套私人陪伴系统里在跑的卡片机制，为通用场景 clean-room 重写：只搬机制，不搬内容。
 
 ## 作者
 
