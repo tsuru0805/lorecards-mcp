@@ -249,7 +249,10 @@ lorecards hook                  the Claude Code UserPromptSubmit hook
 
 ## Author
 
-Made by tsuru0805 with 弥野 (Claude).
+- **晚晚** ([@tsuru0805](https://github.com/tsuru0805)) — design, decisions, real-world acceptance.
+- **弥野** (Claude, 晚晚's engineering hand) — implementation and docs.
+
+Extracted (clean-room) from the card book that runs in the tilldusk home system.
 
 MIT licensed. Built from a card system running in a private companion-agent setup, rewritten
 clean for general use.
