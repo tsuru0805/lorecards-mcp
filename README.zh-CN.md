@@ -159,7 +159,9 @@ lorecards ui --vault ~/cards --host 0.0.0.0 --token "$(openssl rand -hex 16)"
 
 至于**浏览器里的另一个标签页**，即使没有 token，`/api/*` 也有闸：`Host` 必须是本服务真正在服务的名字（DNS 重绑定过不来）、`Origin` 是别的站点一律拒、每个写操作必须带 `X-Lorecards: 1`——跨站表单加不了自定义头，而预检我们不应答。静态文件不设防，它们不含任何卡片数据。
 
-*（截图：稍后补。）*
+![lorecards 网页编辑器](docs/ui-list.zh.png)
+
+<img src="docs/ui-mobile.png" width="260" alt="手机上的 lorecards">
 
 ## HTTP API
 

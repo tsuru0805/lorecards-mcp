@@ -207,7 +207,9 @@ must be one this server actually serves (so a rebound name cannot reach it), a r
 header a cross-site form cannot add without a preflight, which we never answer. Static files
 stay open; they hold no card data.
 
-*(Screenshots: to be added.)*
+![lorecards web editor](docs/ui-list.png)
+
+<img src="docs/ui-mobile.png" width="260" alt="lorecards on a phone">
 
 ## HTTP API
 

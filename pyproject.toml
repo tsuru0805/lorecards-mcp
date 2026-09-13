@@ -43,6 +43,9 @@ lorecards-mcp = "lorecards.server:main"
 Homepage = "https://github.com/tsuru0805/lorecards-mcp"
 Issues = "https://github.com/tsuru0805/lorecards-mcp/issues"
 
+[tool.hatch.build.targets.sdist]
+exclude = [".venv*", ".lorecards", "dist", ".github", "*.png"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["lorecards"]
 

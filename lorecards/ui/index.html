@@ -251,7 +251,7 @@ const I18N = {
     kept: "保留", failed: "失败", untitled: "未命名", token: "访问令牌",
   }
 };
-const LANG = (navigator.language || "en").toLowerCase().startsWith("zh") ? "zh" : "en";
+const LANG = (() => { const q = new URLSearchParams(location.search).get("lang"); if (q === "zh" || q === "en") return q; return (navigator.language || "en").toLowerCase().startsWith("zh") ? "zh" : "en"; })();
 const T = I18N[LANG];
 const KIND_LABEL = {
   en: {people:"People", event:"Events", place:"Places", thing:"Things", slang:"Slang", entry:"Notes"},
