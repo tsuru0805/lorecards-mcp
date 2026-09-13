@@ -29,8 +29,17 @@ behind the user's back. A card book is **canon**: what the user (or the agent, t
 
 ## Install
 
-Not on PyPI yet — [install from source](#from-source) for now. Once it is published,
-`pipx install lorecards-mcp` (or `uv tool install lorecards-mcp`) will be the short way.
+Installs straight from GitHub — no PyPI package needed. Pick one:
+
+```bash
+pipx install 'lorecards-mcp[zh] @ git+https://github.com/tsuru0805/lorecards-mcp'
+uv tool install 'lorecards-mcp[zh] @ git+https://github.com/tsuru0805/lorecards-mcp'
+pip install 'lorecards-mcp[zh] @ git+https://github.com/tsuru0805/lorecards-mcp'   # into any venv
+```
+
+(`[zh]` pulls in the jieba segmenter for Chinese and Japanese; drop it if you only write in
+spaced languages. The `pip` line is the one verified in a clean venv; the other two are the
+standard pipx / uv syntax for a git source.) Or [install from source](#from-source).
 
 ```bash
 lorecards init ~/cards            # the directories, plus one example card per kind

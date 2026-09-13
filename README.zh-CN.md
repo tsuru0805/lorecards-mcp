@@ -19,8 +19,16 @@
 
 ## 安装
 
-还没发到 PyPI，目前请[从源码装](#从源码装)。发包之后 `pipx install lorecards-mcp`
-（或 `uv tool install lorecards-mcp`）就是最短的那条路。
+直接从 GitHub 装，不需要 PyPI 包。三选一：
+
+```bash
+pipx install 'lorecards-mcp[zh] @ git+https://github.com/tsuru0805/lorecards-mcp'
+uv tool install 'lorecards-mcp[zh] @ git+https://github.com/tsuru0805/lorecards-mcp'
+pip install 'lorecards-mcp[zh] @ git+https://github.com/tsuru0805/lorecards-mcp'   # 装进任意 venv
+```
+
+（`[zh]` 会带上 jieba 分词，中文、日文需要；只写有空格的语言可以去掉。`pip` 那行在干净 venv 里实测过，
+另两行是 pipx / uv 装 git 源的标准写法。）也可以[从源码装](#从源码装)。
 
 ```bash
 lorecards init ~/cards            # 建目录，每种卡各放一张示例
