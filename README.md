@@ -179,7 +179,7 @@ recent_section: { people: recent }
 | **Budget** | 800 characters by default. The top card always gets in even if it is over budget; the first card that would overflow stops the list, and the rest are reported as `truncated` |
 | **`enabled: false`** | never loaded. **`inject: true/false`** — `false` keeps a card readable by `read_card`/`list_cards` but out of automatic recall |
 
-Chinese, Japanese and other unspaced text are segmented with [jieba](https://github.com/fxsy/jieba)
+Chinese, Japanese and other unspaced text are segmented with [jieba](https://github.com/fxsjy/jieba)
 when the `[zh]` extra is installed. Without it, matching falls back to substring search plus
 whitespace/punctuation tokens: multi-character terms still work, single-character ones mostly
 will not.
@@ -252,7 +252,4 @@ lorecards hook                  the Claude Code UserPromptSubmit hook
 - **晚晚** ([@tsuru0805](https://github.com/tsuru0805)) — design, decisions, real-world acceptance.
 - **弥野** (Claude, 晚晚's engineering hand) — implementation and docs.
 
-Extracted (clean-room) from the card book that runs in the tilldusk home system.
-
-MIT licensed. Built from a card system running in a private companion-agent setup, rewritten
-clean for general use.
+Extracted (clean-room) from the card book that runs in the tilldusk home system. MIT licensed.
